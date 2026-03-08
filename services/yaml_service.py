@@ -10,18 +10,30 @@ class CleanDumper(yaml.SafeDumper):
     pass
 
 
+class LiteralString(str):
+    pass
+
+
 def normalize_text(value):
     value = value.replace('\r\n', '\n').replace('\r', '\n').replace('\t', ' ')
     lines = [line.rstrip() for line in value.split('\n')]
     return '\n'.join(lines).strip()
 
 
-def sanitize_yaml_value(value):
+def normalize_summary_text(value):
+    value = normalize_text(value)
+    lines = [line for line in value.split('\n') if line.strip()]
+    return '\n'.join(lines).strip()
+
+
+def sanitize_yaml_value(value, key=None):
     if isinstance(value, dict):
-        return {key: sanitize_yaml_value(item) for key, item in value.items()}
+        return {child_key: sanitize_yaml_value(item, child_key) for child_key, item in value.items()}
     if isinstance(value, list):
-        return [sanitize_yaml_value(item) for item in value]
+        return [sanitize_yaml_value(item, key) for item in value]
     if isinstance(value, str):
+        if key == 'summary':
+            return LiteralString(normalize_summary_text(value))
         return normalize_text(value)
     return value
 
@@ -32,6 +44,7 @@ def represent_clean_string(dumper, value):
 
 
 CleanDumper.add_representer(str, represent_clean_string)
+CleanDumper.add_representer(LiteralString, lambda dumper, value: dumper.represent_scalar('tag:yaml.org,2002:str', value, style='|'))
 
 
 def write_yaml(show_data, target_path=None):
