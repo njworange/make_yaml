@@ -76,8 +76,15 @@ class YAMLUTILS(object):
             logger.debug(code)
             site = code[:2]
             code = code[2:]
+            logger.debug(f"YAMLUTILS get_data parsed site={site} code={code}")
             site_dict = {'KW' : WAVVE, 'KV' : TVING, 'KC' : COUPANG, 'FN' : NF, 'FD' : DSNP, 'FA' : ATVP, 'FP' : AMZN, 'KE' : EBS}
             show_data = site_dict[site].make_data(code)
+            if isinstance(show_data, dict):
+                logger.debug(f"YAMLUTILS get_data result site={site} type=dict keys={list(show_data.keys())} seasons={len(show_data.get('seasons', []))}")
+            elif isinstance(show_data, list):
+                logger.debug(f"YAMLUTILS get_data result site={site} type=list len={len(show_data)}")
+            else:
+                logger.debug(f"YAMLUTILS get_data result site={site} type={type(show_data).__name__} truthy={bool(show_data)}")
             if P.ModelSetting.get_int('split_season') != 1:   
                 season_data = []
                 split_season = P.ModelSetting.get_int('split_season')
@@ -96,7 +103,7 @@ class YAMLUTILS(object):
                 show_data['seasons'] = season_data
             return show_data
         except Exception as e: 
-            P.logger.error(f"Exception:{e}")
+            P.logger.error(f"Exception:{e} [site={site if 'site' in locals() else ''} code={code if 'code' in locals() else ''}]")
             P.logger.error(traceback.format_exc())
             
     @classmethod

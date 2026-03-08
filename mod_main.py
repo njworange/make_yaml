@@ -64,10 +64,14 @@ class ModuleMain(PluginModuleBase):
     def disney_redirect(self, code):
         code = code.strip()
         fallback_code = code
+        request_url = ''
+        logger.debug(f"DSNP redirect start raw={code}")
         if 'disneyplus.com' in code:
             url = code
+            request_url = url.split('?', 1)[0]
             match = re.search(r'/series/.*?/(?P<code>[^?&#/]+)', code)
             if match:
+                logger.debug(f"DSNP redirect direct series code={match.group('code')}")
                 return match.group('code')
             match = re.search(r'/browse/(?P<code>entity-[^?&#/]+)', code)
             if match:
@@ -75,6 +79,8 @@ class ModuleMain(PluginModuleBase):
         else:
             fallback_code = re.sub(r'^entity-', '', code)
             url = 'https://www.disneyplus.com/ko-kr/browse/entity-' + fallback_code
+            request_url = url
+        logger.debug(f"DSNP redirect prepared fallback={fallback_code} request_url={request_url}")
 
         headers = {
             "sec-ch-ua-platform": "\"Windows\"",
@@ -86,15 +92,20 @@ class ModuleMain(PluginModuleBase):
         }
         try:
             response = requests.get(url, headers=headers, allow_redirects=True)
+            logger.debug(f"DSNP redirect response final_url={response.url.split('?', 1)[0]} history={len(response.history)}")
             match = re.search(r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&/]+)', response.url)
             if match:
+                logger.debug(f"DSNP redirect resolved series code={match.group('code')}")
                 return match.group('code')
             match = re.search(r'/browse/(?P<code>entity-[^?&#/]+)', response.url)
             if match:
-                return match.group('code').replace('entity-', '', 1)
+                browse_code = match.group('code').replace('entity-', '', 1)
+                logger.debug(f"DSNP redirect browse fallback code={browse_code}")
+                return browse_code
         except Exception as e:
             logger.error(f"Exception:{str(e)}")
             logger.error(traceback.format_exc())
+        logger.debug(f"DSNP redirect returning fallback={fallback_code}")
         return fallback_code
 
     def is_disney_entity_code(self, code):
@@ -159,10 +170,12 @@ class ModuleMain(PluginModuleBase):
             self.code = 'FN'+arg1
         elif command == 'dsnp_code':
             needs_redirect = 'disneyplus.com' in arg1 or arg1.startswith('entity-')
+            logger.debug(f"DSNP command received arg1={arg1} arg2={arg2} needs_redirect_initial={needs_redirect} is_entity={self.is_disney_entity_code(arg1)}")
             if not needs_redirect and self.is_disney_entity_code(arg1):
                 needs_redirect = True
             if needs_redirect:
                 arg1 = self.disney_redirect(arg1)
+                logger.debug(f"DSNP command redirected arg1={arg1} unresolved_entity={self.is_disney_entity_code(arg1)}")
                 if self.is_disney_entity_code(arg1):
                     if arg2 == 'test':
                         return jsonify({'ret':'fail', 'msg':'디즈니 시리즈 코드 확인 실패', 'json': []})
@@ -179,6 +192,7 @@ class ModuleMain(PluginModuleBase):
             site_name_dict = {
                 'KW' : '웨이브', 'KV' : '티빙', 'KC' : '쿠팡 플레이', 'FN' : '넷플릭스', 'FD' : '디즈니 플러스', 'FP' : '프라임 비디오', 'FA' : '애플TV', 'KE' : 'EBS',
             }
+            logger.debug(f"Command {command} executing code={self.code} mode={arg2}")
             show_data = YAMLUTILS.get_data(self.code)
             if arg2 == 'test':
                 return jsonify({'ret':'success', 'json': show_data})
