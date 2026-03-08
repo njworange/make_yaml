@@ -1,7 +1,6 @@
-from metadata.mod_ftv import ModuleFtv
-
-
 def apply_tmdb_data(tmdb_code, show_data):
+    from metadata.mod_ftv import ModuleFtv
+
     tmdbftv = ModuleFtv('metadata')
     data = tmdbftv.info(tmdb_code)
     data = tmdbftv.process_trans('show', data)
