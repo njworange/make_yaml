@@ -3,7 +3,7 @@ version: "1.0.0"
 package_name: "make_yaml"
 developer: "kihyyo"
 description: "OTT 정보로 직접 yaml로 만드는 플러그인"
-home: "https://github.com/kihyyo/make_yaml"
+home: "https://github.com/njworange/make_yaml"
 more: "https://raw.githubusercontent.com/kihyyo/make_yaml/main/README.md"
 
 require_plugin: "support_site"
@@ -11,5 +11,6 @@ require_os' : ""
 need_decrypt_code: false
 need_filesize_check': false
 filesize: 0
+
 
 
