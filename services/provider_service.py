@@ -65,16 +65,28 @@ def decode_ebs_text(value):
     return text.strip()
 
 
+def decode_response_html(response):
+    content = response.content or b''
+    for encoding in ['utf-8', response.encoding, getattr(response, 'apparent_encoding', None), 'cp949']:
+        if not encoding:
+            continue
+        try:
+            return content.decode(encoding)
+        except Exception:
+            continue
+    return response.text
+
+
 def fetch_ebs_html(url):
     response = requests.get(url, headers=EBS_HEADERS, timeout=15)
     response.raise_for_status()
-    return response.text
+    return decode_response_html(response)
 
 
 def fetch_appletv_html(url):
     response = requests.get(url, headers=APPLE_TV_HEADERS, timeout=15)
     response.raise_for_status()
-    return response.text
+    return decode_response_html(response)
 
 
 def extract_ebs_meta_content(page_html, property_name):
