@@ -24,6 +24,39 @@ WAVVE_API_PARAMS = {
 }
 
 
+def parse_wavve_release_date(cell):
+    release_date = (cell.get('releasedate') or '').strip()
+    if release_date:
+        return release_date
+    for title_info in cell.get('title_list', []):
+        text = (title_info.get('text') or '').strip()
+        match = re.search(r'(20\d{2}-\d{2}-\d{2})', text)
+        if match:
+            return match.group(1)
+    return ''
+
+
+def extract_wavve_orderby(program_id):
+    try:
+        response = requests.get(
+            'https://apis.wavve.com/fz/vod/programs/landing',
+            params={**WAVVE_API_PARAMS, 'history': 'all', 'programid': program_id},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        for tab in payload.get('landing_list', {}).get('tab', []):
+            if tab.get('type') == 'episode':
+                path = tab.get('path', '')
+                match = re.search(r'orderby=([a-z]+)', path)
+                if match:
+                    return match.group(1)
+    except Exception as e:
+        logger.error(f"Exception:{str(e)}")
+        logger.error(traceback.format_exc())
+    return ''
+
+
 def extract_date_from_tving_thumb(url):
     if not url:
         return ''
@@ -52,38 +85,44 @@ def normalize_tving_episode_title(title):
 def fetch_wavve_episode_metadata(program_id, episode_count):
     metadata_by_title = {}
     metadata_by_index = {}
-    offset = 0
     limit = min(max(episode_count, 1), 100)
-    while len(metadata_by_index) < episode_count:
-        try:
-            response = requests.get(
-                f'https://apis.wavve.com/fz/vod/programs/{program_id}/contents',
-                params={**WAVVE_API_PARAMS, 'limit': limit, 'offset': offset, 'orderby': 'new'},
-                timeout=10,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            cell_list = payload.get('cell_toplist', {}).get('celllist', [])
-            if not cell_list:
+    orderby_candidates = []
+    preferred_orderby = extract_wavve_orderby(program_id)
+    for value in [preferred_orderby, 'new', 'old']:
+        if value and value not in orderby_candidates:
+            orderby_candidates.append(value)
+    for orderby in orderby_candidates:
+        offset = 0
+        while len(metadata_by_index) < episode_count:
+            try:
+                response = requests.get(
+                    f'https://apis.wavve.com/fz/vod/programs/{program_id}/contents',
+                    params={**WAVVE_API_PARAMS, 'limit': limit, 'offset': offset, 'orderby': orderby},
+                    timeout=10,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                cell_list = payload.get('cell_toplist', {}).get('celllist', [])
+                if not cell_list:
+                    break
+                for cell in cell_list:
+                    normalized_title = normalize_tving_episode_title(cell.get('episodetitle', ''))
+                    episode_metadata = {
+                        'releasedate': parse_wavve_release_date(cell),
+                        'title': normalized_title,
+                        'episodenumber': str(cell.get('episodenumber') or '').strip(),
+                    }
+                    metadata_by_title[normalized_title] = episode_metadata
+                    episode_number = episode_metadata['episodenumber']
+                    if episode_number:
+                        metadata_by_index[episode_number] = episode_metadata
+                offset += len(cell_list)
+                if len(cell_list) < limit:
+                    break
+            except Exception as e:
+                logger.error(f"Exception:{str(e)}")
+                logger.error(traceback.format_exc())
                 break
-            for cell in cell_list:
-                normalized_title = normalize_tving_episode_title(cell.get('episodetitle', ''))
-                episode_metadata = {
-                    'releasedate': (cell.get('releasedate') or '').strip(),
-                    'title': normalized_title,
-                    'episodenumber': str(cell.get('episodenumber') or '').strip(),
-                }
-                metadata_by_title[normalized_title] = episode_metadata
-                episode_number = episode_metadata['episodenumber']
-                if episode_number:
-                    metadata_by_index[episode_number] = episode_metadata
-            offset += len(cell_list)
-            if len(cell_list) < limit:
-                break
-        except Exception as e:
-            logger.error(f"Exception:{str(e)}")
-            logger.error(traceback.format_exc())
-            break
     logger.debug(
         f"Wavve metadata fetched program_id={program_id} "
         f"title_entries={len(metadata_by_title)} index_entries={len(metadata_by_index)}"
@@ -97,9 +136,13 @@ def fetch_wavve_episode_metadata(program_id, episode_count):
 def normalize_wavve_show_data(program_id, show_data):
     if not isinstance(show_data, dict):
         return show_data
+    if isinstance(show_data.get('summary'), str) and show_data['summary'].startswith('"'):
+        show_data['summary'] = show_data['summary'][1:].strip()
     episode_count = sum(len(season.get('episodes', [])) for season in show_data.get('seasons', []))
     episode_metadata = fetch_wavve_episode_metadata(program_id, episode_count)
     for season in show_data.get('seasons', []):
+        if isinstance(season.get('summary'), str) and season['summary'].startswith('"'):
+            season['summary'] = season['summary'][1:].strip()
         for episode in season.get('episodes', []):
             original_title = normalize_tving_episode_title(episode.get('title', ''))
             metadata = episode_metadata.get('by_index', {}).get(str(episode.get('index', '')), {})
@@ -108,6 +151,7 @@ def normalize_wavve_show_data(program_id, show_data):
             air_date = (episode.get('originally_available_at') or metadata.get('releasedate') or '').strip()
             if air_date:
                 episode['originally_available_at'] = air_date
+                logger.debug(f"Wavve episode normalized index={episode.get('index')} air_date={air_date} title={original_title}")
             date_prefix = format_korean_broadcast_date(air_date)
             if date_prefix and original_title:
                 episode['title'] = f'{date_prefix} {original_title}'
