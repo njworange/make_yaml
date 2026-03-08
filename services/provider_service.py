@@ -237,7 +237,7 @@ def extract_appletv_meta_content(page_html, property_name):
 
 def extract_appletv_json_ld(page_html, script_id):
     match = re.search(
-        rf'<script[^>]+id={re.escape(script_id)}[^>]*>(?P<value>.*?)</script>',
+        rf'<script[^>]+id=(?:["\'])?{re.escape(script_id)}(?:["\'])?[^>]*>(?P<value>.*?)</script>',
         page_html,
         flags=re.I | re.S,
     )
@@ -283,11 +283,38 @@ def extract_appletv_personnel(page_html, title_text):
 
 
 def extract_appletv_season_blocks(page_html):
-    pattern = re.compile(
+    blocks = []
+    direct_pattern = re.compile(
         r'<h2 class="title[^"]*"[^>]*><span class="dir-wrapper"[^>]*>(?P<title>시즌\s*\d+)</span></h2>(?P<body>.*?)(?=<h2 class="title|</main>)',
         flags=re.S,
     )
-    return [(decode_ebs_text(match.group('title')), match.group('body')) for match in pattern.finditer(page_html)]
+    for match in direct_pattern.finditer(page_html):
+        blocks.append((decode_ebs_text(match.group('title')), match.group('body')))
+    if blocks:
+        return blocks
+
+    select_match = re.search(
+        r'data-testid="accessory-button-select-text">\s*(?P<title>시즌\s*\d+)\s*</div>(?P<body>.*?)(?=</main>)',
+        page_html,
+        flags=re.S,
+    )
+    if select_match:
+        return [(decode_ebs_text(select_match.group('title')), select_match.group('body'))]
+    return []
+
+
+def extract_appletv_current_season_title(page_html):
+    match = re.search(
+        r'data-testid="accessory-button-select-text">\s*(?P<title>시즌\s*\d+)\s*</div>',
+        page_html,
+        flags=re.S,
+    )
+    if match:
+        return decode_ebs_text(match.group('title'))
+    match = re.search(r'>(?P<title>시즌\s*\d+)<', page_html)
+    if match:
+        return decode_ebs_text(match.group('title'))
+    return '시즌 1'
 
 
 def extract_appletv_episodes(season_html):
@@ -331,6 +358,17 @@ def build_appletv_show_data(show_id):
             'summary': '',
             'episodes': episodes,
         })
+    if not seasons:
+        current_season_title = extract_appletv_current_season_title(page_html)
+        current_episodes = extract_appletv_episodes(page_html)
+        if current_episodes:
+            season_number_match = re.search(r'(\d+)', current_season_title)
+            seasons.append({
+                'index': int(season_number_match.group(1)) if season_number_match else 1,
+                'title': current_season_title,
+                'summary': '',
+                'episodes': current_episodes,
+            })
     if not seasons:
         return None
     show_data = {
