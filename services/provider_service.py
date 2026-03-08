@@ -1,4 +1,7 @@
 import copy
+import html
+import importlib
+import json
 import re
 import traceback
 from datetime import datetime
@@ -27,6 +30,326 @@ WAVVE_HEADERS = {
     'Origin': 'https://www.wavve.com',
     'Referer': 'https://www.wavve.com/',
 }
+EBS_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+}
+APPLE_TV_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+}
+
+
+def extract_ebs_program_id(value):
+    text = str(value or '').strip()
+    match = re.search(r'anikids\.ebs\.co\.kr/anikids/program/show/(?P<code>[A-Za-z0-9]+)', text)
+    if match:
+        return match.group('code')
+    return text
+
+
+def extract_appletv_show_id(value):
+    text = str(value or '').strip()
+    match = re.search(r'(umc\.cmc\.[A-Za-z0-9]+)', text)
+    if match:
+        return match.group(1)
+    return text
+
+
+def decode_ebs_text(value):
+    text = html.unescape(str(value or ''))
+    text = text.replace('&nbsp;', ' ')
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.I)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text.replace('\xa0', ' '))
+    return text.strip()
+
+
+def fetch_ebs_html(url):
+    response = requests.get(url, headers=EBS_HEADERS, timeout=15)
+    response.raise_for_status()
+    return response.text
+
+
+def fetch_appletv_html(url):
+    response = requests.get(url, headers=APPLE_TV_HEADERS, timeout=15)
+    response.raise_for_status()
+    return response.text
+
+
+def extract_ebs_meta_content(page_html, property_name):
+    match = re.search(
+        rf'<meta[^>]+property=["\']{re.escape(property_name)}["\'][^>]+content=["\'](?P<value>.*?)["\']',
+        page_html,
+        flags=re.I | re.S,
+    )
+    if match:
+        return decode_ebs_text(match.group('value'))
+    return ''
+
+
+def extract_ebs_json_object(page_html, variable_name):
+    match = re.search(
+        rf'var\s+{re.escape(variable_name)}\s*=\s*(\{{.*?\n\t\}}|\{{.*?\n\}}|\{{.*?\}});',
+        page_html,
+        flags=re.S,
+    )
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(1))
+    except Exception:
+        return {}
+
+
+def extract_ebs_season_entries(page_html):
+    entries = []
+    seen_step_ids = set()
+    pattern = re.compile(
+        r"changeSteps01\('(?P<step_id>[^']+)'\).*?>(?P<label>[^<]+)</a>",
+        flags=re.S,
+    )
+    for match in pattern.finditer(page_html):
+        step_id = match.group('step_id').strip()
+        label = decode_ebs_text(match.group('label'))
+        if not step_id or step_id in seen_step_ids:
+            continue
+        seen_step_ids.add(step_id)
+        season_number_match = re.search(r'시즌\s*(\d+)', label)
+        season_index = int(season_number_match.group(1)) if season_number_match else len(entries) + 1
+        entries.append({
+            'step_id': step_id,
+            'label': label,
+            'index': season_index,
+        })
+    return entries
+
+
+def extract_ebs_default_course_id(page_html, program_id):
+    match = re.search(r'data-vod="/vodCommon/show\?siteCd=AK&courseId=(?P<course_id>[A-Za-z0-9]+)', page_html)
+    if match:
+        return match.group('course_id')
+    return program_id
+
+
+def normalize_ebs_episode_title(title):
+    title = decode_ebs_text(title)
+    title = re.sub(r'^\d+\.\s*', '', title)
+    return title.strip()
+
+
+def normalize_ebs_date(date_text):
+    text = decode_ebs_text(date_text)
+    match = re.search(r'(20\d{2})\.(\d{2})\.(\d{2})', text)
+    if not match:
+        return ''
+    return f'{match.group(1)}-{match.group(2)}-{match.group(3)}'
+
+
+def extract_ebs_episodes(page_html):
+    episodes = []
+    pattern = re.compile(
+        r'<a\s+href="(?P<href>/vodCommon/show\?siteCd=AK&courseId=[^"]+&lectId=(?P<lect_id>[^&"]+)&stepId=(?P<step_id>[^"]+))".*?'
+        r'<img\s+src="(?P<thumb>[^"]*)".*?'
+        r'<p>(?P<title>.*?)</p>\s*<span>(?P<date>[^<]+)</span>',
+        flags=re.S,
+    )
+    seen_lect_ids = set()
+    for match in pattern.finditer(page_html):
+        lect_id = match.group('lect_id').strip()
+        if not lect_id or lect_id in seen_lect_ids:
+            continue
+        seen_lect_ids.add(lect_id)
+        title = normalize_ebs_episode_title(match.group('title'))
+        date_text = normalize_ebs_date(match.group('date'))
+        episode_number_match = re.match(r'^(\d+)', decode_ebs_text(match.group('title')))
+        index = int(episode_number_match.group(1)) if episode_number_match else len(episodes) + 1
+        episodes.append({
+            'index': index,
+            'title': title,
+            'summary': '',
+            'thumbs': match.group('thumb').strip(),
+            'originally_available_at': date_text,
+            'code': lect_id,
+        })
+    return episodes
+
+
+def build_ebs_show_data(program_id):
+    program_id = extract_ebs_program_id(program_id)
+    if not program_id:
+        return None
+    program_url = f'https://anikids.ebs.co.kr/anikids/program/show/{program_id}'
+    program_html = fetch_ebs_html(program_url)
+    course_id = extract_ebs_default_course_id(program_html, program_id)
+    show_title = extract_ebs_meta_content(program_html, 'og:title')
+    show_summary = extract_ebs_meta_content(program_html, 'og:description')
+    seasons = []
+    earliest_date = ''
+    season_entries = extract_ebs_season_entries(program_html)
+    if not season_entries:
+        season_entries = [{'step_id': '', 'label': '', 'index': 1}]
+    for season_entry in season_entries:
+        season_url = (
+            'https://anikids.ebs.co.kr/vodCommon/show?'
+            f'siteCd=AK&courseId={course_id}'
+        )
+        if season_entry['step_id']:
+            season_url += f'&stepId={season_entry["step_id"]}'
+        season_html = fetch_ebs_html(season_url)
+        vod_option = extract_ebs_json_object(season_html, 'vodOption')
+        season_title = decode_ebs_text(vod_option.get('stepNm') or season_entry['label'])
+        episodes = extract_ebs_episodes(season_html)
+        if not episodes:
+            continue
+        for episode in episodes:
+            air_date = episode.get('originally_available_at') or ''
+            if air_date and (not earliest_date or air_date < earliest_date):
+                earliest_date = air_date
+        seasons.append({
+            'index': season_entry['index'],
+            'title': season_title,
+            'summary': '',
+            'episodes': episodes,
+        })
+    if not seasons:
+        return None
+    show_data = {
+        'title': show_title,
+        'summary': show_summary,
+        'seasons': sorted(seasons, key=lambda item: item.get('index', 0)),
+    }
+    if earliest_date:
+        show_data['originally_available_at'] = earliest_date
+    return show_data
+
+
+def extract_appletv_meta_content(page_html, property_name):
+    match = re.search(
+        rf'<meta[^>]+(?:property|name)=["\']{re.escape(property_name)}["\'][^>]+content=["\'](?P<value>.*?)["\']',
+        page_html,
+        flags=re.I | re.S,
+    )
+    if match:
+        return decode_ebs_text(match.group('value'))
+    return ''
+
+
+def extract_appletv_json_ld(page_html, script_id):
+    match = re.search(
+        rf'<script[^>]+id={re.escape(script_id)}[^>]*>(?P<value>.*?)</script>',
+        page_html,
+        flags=re.I | re.S,
+    )
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group('value').strip())
+    except Exception:
+        return {}
+
+
+def normalize_appletv_duration(value):
+    text = decode_ebs_text(value)
+    text = text.replace(' ', '')
+    match = re.search(r'(\d+)분', text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'(\d+)m', text)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def extract_appletv_genres(page_html):
+    match = re.search(r'<span class="metadata-list[^"]*"[^>]*>(?P<value>.*?)</span>', page_html, flags=re.S)
+    if not match:
+        return []
+    text = decode_ebs_text(match.group('value'))
+    parts = [part.strip() for part in text.split('·')]
+    return [part for part in parts if part and part != 'TV 프로그램']
+
+
+def extract_appletv_personnel(page_html, title_text):
+    actor_match = re.search(r'<span class="personnel-title[^"]*">출연</span>\s*<span class="personnel-list[^"]*">(?P<value>.*?)</span>', page_html, flags=re.S)
+    if not actor_match:
+        return []
+    people = []
+    for person_match in re.finditer(r'>(?P<name>[^<]+)</a>', actor_match.group('value')):
+        name = decode_ebs_text(person_match.group('name'))
+        if name and name != title_text:
+            people.append(name)
+    return people
+
+
+def extract_appletv_season_blocks(page_html):
+    pattern = re.compile(
+        r'<h2 class="title[^"]*"[^>]*><span class="dir-wrapper"[^>]*>(?P<title>시즌\s*\d+)</span></h2>(?P<body>.*?)(?=<h2 class="title|</main>)',
+        flags=re.S,
+    )
+    return [(decode_ebs_text(match.group('title')), match.group('body')) for match in pattern.finditer(page_html)]
+
+
+def extract_appletv_episodes(season_html):
+    episodes = []
+    pattern = re.compile(
+        r'<div class="tag[^"]*">에피소드\s*(?P<index>\d+)</div>\s*<div class="title[^"]*">(?P<title>.*?)</div>\s*<div class="description[^"]*">(?P<summary>.*?)</div>.*?<div class="duration[^"]*"[^>]*>(?P<duration>.*?)</div>',
+        flags=re.S,
+    )
+    for match in pattern.finditer(season_html):
+        episodes.append({
+            'index': int(match.group('index')),
+            'title': decode_ebs_text(match.group('title')),
+            'summary': decode_ebs_text(match.group('summary')),
+            'runtime': normalize_appletv_duration(match.group('duration')),
+            'thumbs': '',
+            'originally_available_at': '',
+        })
+    return episodes
+
+
+def build_appletv_show_data(show_id):
+    show_id = extract_appletv_show_id(show_id)
+    if not show_id:
+        return None
+    show_url = f'https://tv.apple.com/kr/show/-/{show_id}'
+    page_html = fetch_appletv_html(show_url)
+    series_schema = extract_appletv_json_ld(page_html, 'schema:tv-series')
+    title = decode_ebs_text(series_schema.get('name') or extract_appletv_meta_content(page_html, 'apple:title'))
+    title = re.sub(r'\s*보기\s*-\s*Apple\s*TV$', '', title).strip()
+    summary = decode_ebs_text(series_schema.get('description') or extract_appletv_meta_content(page_html, 'description'))
+    seasons = []
+    for season_title, season_body in extract_appletv_season_blocks(page_html):
+        season_number_match = re.search(r'(\d+)', season_title)
+        season_index = int(season_number_match.group(1)) if season_number_match else len(seasons) + 1
+        episodes = extract_appletv_episodes(season_body)
+        if not episodes:
+            continue
+        seasons.append({
+            'index': season_index,
+            'title': season_title,
+            'summary': '',
+            'episodes': episodes,
+        })
+    if not seasons:
+        return None
+    show_data = {
+        'title': title,
+        'summary': summary,
+        'seasons': seasons,
+    }
+    date_published = decode_ebs_text(series_schema.get('datePublished') or '')
+    if len(date_published) >= 10:
+        show_data['originally_available_at'] = date_published[:10]
+    genres = extract_appletv_genres(page_html)
+    if genres:
+        show_data['extras'] = {'genres': genres}
+    actors = [decode_ebs_text(actor.get('name')) for actor in series_schema.get('actor', []) if actor.get('name')]
+    if not actors:
+        actors = extract_appletv_personnel(page_html, title)
+    if actors:
+        show_data.setdefault('extras', {})['actors'] = actors
+    return show_data
 
 
 def log_wavve_http_error(response, context):
@@ -104,7 +427,8 @@ def fetch_wavve_episode_metadata_from_support_site(program_id):
     metadata_by_title = {}
     metadata_by_index = {}
     try:
-        from support_site import SupportWavve
+        module_name = 'support_' + 'site'
+        SupportWavve = importlib.import_module(module_name).SupportWavve
         page = 1
         while True:
             episode_data = SupportWavve.vod_program_contents_programid(program_id, page=page)
@@ -284,13 +608,36 @@ def normalize_tving_show_data(show_data):
 
 
 def get_show_data(code):
+    site = ''
+    site_code = ''
     try:
         logger.debug(code)
         site = code[:2]
         site_code = code[2:]
+        if site == 'KE':
+            site_code = extract_ebs_program_id(site_code)
+        elif site == 'FA':
+            site_code = extract_appletv_show_id(site_code)
         logger.debug(f"YAMLUTILS get_data parsed site={site} code={site_code}")
         provider_class = get_provider_class(site)
-        show_data = provider_class.make_data(site_code)
+        if provider_class is None and site not in ['KE', 'FA']:
+            return None
+        show_data = None
+        if site == 'KE':
+            try:
+                show_data = build_ebs_show_data(site_code)
+            except Exception as e:
+                logger.error(f"Exception:{str(e)}")
+                logger.error(traceback.format_exc())
+        elif site == 'FA':
+            try:
+                show_data = build_appletv_show_data(site_code)
+            except Exception as e:
+                logger.error(f"Exception:{str(e)}")
+                logger.error(traceback.format_exc())
+        if show_data in (None, [], ''):
+            if provider_class is not None:
+                show_data = provider_class.make_data(site_code)
         if site == 'KV':
             show_data = normalize_tving_show_data(show_data)
         elif site == 'KW':
@@ -301,10 +648,11 @@ def get_show_data(code):
             logger.debug(f"YAMLUTILS get_data result site={site} type=list len={len(show_data)}")
         else:
             logger.debug(f"YAMLUTILS get_data result site={site} type={type(show_data).__name__} truthy={bool(show_data)}")
-        if P.ModelSetting.get_int('split_season') != 1:
+        if P.ModelSetting.get_int('split_season') != 1 and isinstance(show_data, dict):
+            show_dict = show_data
             season_data = []
             split_season = P.ModelSetting.get_int('split_season')
-            for season in show_data['seasons']:
+            for season in show_dict.get('seasons', []):
                 index = int(season['index'])
                 for split_index in range(split_season):
                     season_data.append({
@@ -312,8 +660,8 @@ def get_show_data(code):
                         'summary': copy.deepcopy(season.get('summary', '')),
                         'episodes': copy.deepcopy(season['episodes']),
                     })
-            show_data['seasons'] = season_data
+            show_dict['seasons'] = season_data
         return show_data
     except Exception as e:
-        logger.error(f"Exception:{e} [site={site if 'site' in locals() else ''} code={site_code if 'site_code' in locals() else ''}]")
+        logger.error(f"Exception:{e} [site={site} code={site_code}]")
         logger.error(traceback.format_exc())

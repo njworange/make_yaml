@@ -84,9 +84,9 @@ PROVIDER_METADATA = {
     'KC': {'command': 'cpang_code', 'display_name': '쿠팡 플레이', 'module_name': 'site_coupang', 'class_name': 'COUPANG', 'user_order': 'COUPANG', 'enabled': False},
     'FN': {'command': 'nf_code', 'display_name': '넷플릭스', 'module_name': 'site_netflix', 'class_name': 'NF', 'user_order': 'NF', 'enabled': False},
     'FD': {'command': 'dsnp_code', 'display_name': '디즈니 플러스', 'module_name': 'site_disney', 'class_name': 'DSNP', 'user_order': 'DSNP', 'enabled': True},
-    'FA': {'command': 'atvp_code', 'display_name': '애플TV', 'module_name': 'site_appletv', 'class_name': 'ATVP', 'user_order': 'ATVP', 'enabled': False},
+    'FA': {'command': 'atvp_code', 'display_name': '애플TV', 'module_name': 'site_appletv', 'class_name': 'ATVP', 'user_order': 'ATVP', 'enabled': True},
     'FP': {'command': 'amzn_code', 'display_name': '프라임 비디오', 'module_name': 'site_prime', 'class_name': 'AMZN', 'user_order': 'AMZN', 'enabled': False},
-    'KE': {'command': 'ebskids_code', 'display_name': 'EBS', 'module_name': 'site_ebs', 'class_name': 'EBS', 'user_order': 'EBS', 'enabled': False},
+    'KE': {'command': 'ebskids_code', 'display_name': 'EBS', 'module_name': 'site_ebs', 'class_name': 'EBS', 'user_order': 'EBS', 'enabled': True},
 }
 
 

@@ -13,6 +13,7 @@ REGEX_BY_PROVIDER_KEY = {
     'dsnp': r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&]+)',
     'atvp': r'apple.com/.*?(?P<code>umc.cmc.[a-zA-Z0-9]+)$',
     'amzn': r'gti\.(?P<code>[a-zA-Z0-9-]+)',
+    'ebs': r'anikids\.ebs\.co\.kr\/anikids\/program\/show\/(?P<code>[A-Za-z0-9]+)',
 }
 
 PREFIX_BY_PROVIDER_KEY = {
@@ -23,6 +24,7 @@ PREFIX_BY_PROVIDER_KEY = {
     'dsnp': 'FD',
     'atvp': 'FA',
     'amzn': 'FP',
+    'ebs': 'KE',
 }
 
 
