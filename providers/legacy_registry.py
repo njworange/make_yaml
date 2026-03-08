@@ -79,14 +79,14 @@ DIRECT_COMMAND_PREFIX_MAP = {
 }
 
 PROVIDER_METADATA = {
-    'KW': {'command': 'wavve_code', 'display_name': '웨이브', 'module_name': 'site_wavve', 'class_name': 'WAVVE', 'user_order': 'WAVVE'},
-    'KV': {'command': 'tving_code', 'display_name': '티빙', 'module_name': 'site_tving', 'class_name': 'TVING', 'user_order': 'TVING'},
-    'KC': {'command': 'cpang_code', 'display_name': '쿠팡 플레이', 'module_name': 'site_coupang', 'class_name': 'COUPANG', 'user_order': 'COUPANG'},
-    'FN': {'command': 'nf_code', 'display_name': '넷플릭스', 'module_name': 'site_netflix', 'class_name': 'NF', 'user_order': 'NF'},
-    'FD': {'command': 'dsnp_code', 'display_name': '디즈니 플러스', 'module_name': 'site_disney', 'class_name': 'DSNP', 'user_order': 'DSNP'},
-    'FA': {'command': 'atvp_code', 'display_name': '애플TV', 'module_name': 'site_appletv', 'class_name': 'ATVP', 'user_order': 'ATVP'},
-    'FP': {'command': 'amzn_code', 'display_name': '프라임 비디오', 'module_name': 'site_prime', 'class_name': 'AMZN', 'user_order': 'AMZN'},
-    'KE': {'command': 'ebskids_code', 'display_name': 'EBS', 'module_name': 'site_ebs', 'class_name': 'EBS', 'user_order': 'EBS'},
+    'KW': {'command': 'wavve_code', 'display_name': '웨이브', 'module_name': 'site_wavve', 'class_name': 'WAVVE', 'user_order': 'WAVVE', 'enabled': True},
+    'KV': {'command': 'tving_code', 'display_name': '티빙', 'module_name': 'site_tving', 'class_name': 'TVING', 'user_order': 'TVING', 'enabled': True},
+    'KC': {'command': 'cpang_code', 'display_name': '쿠팡 플레이', 'module_name': 'site_coupang', 'class_name': 'COUPANG', 'user_order': 'COUPANG', 'enabled': False},
+    'FN': {'command': 'nf_code', 'display_name': '넷플릭스', 'module_name': 'site_netflix', 'class_name': 'NF', 'user_order': 'NF', 'enabled': False},
+    'FD': {'command': 'dsnp_code', 'display_name': '디즈니 플러스', 'module_name': 'site_disney', 'class_name': 'DSNP', 'user_order': 'DSNP', 'enabled': False},
+    'FA': {'command': 'atvp_code', 'display_name': '애플TV', 'module_name': 'site_appletv', 'class_name': 'ATVP', 'user_order': 'ATVP', 'enabled': False},
+    'FP': {'command': 'amzn_code', 'display_name': '프라임 비디오', 'module_name': 'site_prime', 'class_name': 'AMZN', 'user_order': 'AMZN', 'enabled': False},
+    'KE': {'command': 'ebskids_code', 'display_name': 'EBS', 'module_name': 'site_ebs', 'class_name': 'EBS', 'user_order': 'EBS', 'enabled': False},
 }
 
 
@@ -108,3 +108,22 @@ def get_direct_command_prefix(command):
 
 def get_provider_metadata(prefix):
     return PROVIDER_METADATA[prefix]
+
+
+def is_provider_enabled(prefix):
+    return PROVIDER_METADATA[prefix]['enabled']
+
+
+def is_command_enabled(command):
+    prefix = get_direct_command_prefix(command)
+    if prefix is None:
+        return True
+    return is_provider_enabled(prefix)
+
+
+def filter_enabled_user_order(user_order):
+    enabled_tokens = []
+    for prefix, metadata in PROVIDER_METADATA.items():
+        if metadata['enabled']:
+            enabled_tokens.append(metadata['user_order'])
+    return [token for token in user_order if token.strip().upper() in enabled_tokens]

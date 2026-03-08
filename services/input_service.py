@@ -1,11 +1,11 @@
-from ..providers.legacy_registry import get_direct_command_prefix, get_ottcode_class, get_provider_name
+from ..providers.legacy_registry import filter_enabled_user_order, get_direct_command_prefix, get_ottcode_class, get_provider_name
 from ..setup import P
 from .code_service import sort_code
 
 
 def resolve_search_parts(parts):
     ottcode_class = get_ottcode_class()
-    user_order = P.ModelSetting.get_list('ftv_first_order', ',')
+    user_order = filter_enabled_user_order(P.ModelSetting.get_list('ftv_first_order', ','))
     if len(parts) == 1:
         ottcode = ottcode_class(parts[0].strip())
     elif len(parts) == 2:
