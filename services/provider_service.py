@@ -85,6 +85,54 @@ def parse_wavve_release_date(cell):
     return ''
 
 
+def parse_wavve_episode_number(value):
+    text = str(value or '').strip()
+    match = re.search(r'(\d+)', text)
+    return match.group(1) if match else ''
+
+
+def build_wavve_episode_metadata(cell):
+    normalized_title = normalize_tving_episode_title(cell.get('episodetitle', ''))
+    return {
+        'releasedate': parse_wavve_release_date(cell),
+        'title': normalized_title,
+        'episodenumber': parse_wavve_episode_number(cell.get('episodenumber')),
+    }
+
+
+def fetch_wavve_episode_metadata_from_support_site(program_id):
+    metadata_by_title = {}
+    metadata_by_index = {}
+    try:
+        from support_site import SupportWavve
+        page = 1
+        while True:
+            episode_data = SupportWavve.vod_program_contents_programid(program_id, page=page)
+            episode_list = episode_data.get('list') or []
+            if not episode_list:
+                break
+            for episode in episode_list:
+                episode_metadata = build_wavve_episode_metadata(episode)
+                metadata_by_title[episode_metadata['title']] = episode_metadata
+                episode_number = episode_metadata['episodenumber']
+                if episode_number:
+                    metadata_by_index[episode_number] = episode_metadata
+            if episode_data.get('pagecount') == episode_data.get('count') or page == 10:
+                break
+            page += 1
+        logger.debug(
+            f"Wavve support_site metadata fetched program_id={program_id} "
+            f"title_entries={len(metadata_by_title)} index_entries={len(metadata_by_index)}"
+        )
+    except Exception as e:
+        logger.error(f"Exception:{str(e)}")
+        logger.error(traceback.format_exc())
+    return {
+        'by_title': metadata_by_title,
+        'by_index': metadata_by_index,
+    }
+
+
 def extract_wavve_orderby(program_id):
     session = create_wavve_session(program_id)
     params = bootstrap_wavve_session(session, program_id)
@@ -136,6 +184,9 @@ def normalize_tving_episode_title(title):
 
 
 def fetch_wavve_episode_metadata(program_id, episode_count):
+    support_site_metadata = fetch_wavve_episode_metadata_from_support_site(program_id)
+    if support_site_metadata.get('by_index') or support_site_metadata.get('by_title'):
+        return support_site_metadata
     session = create_wavve_session(program_id)
     base_params = bootstrap_wavve_session(session, program_id)
     metadata_by_title = {}
@@ -163,12 +214,8 @@ def fetch_wavve_episode_metadata(program_id, episode_count):
                 if not cell_list:
                     break
                 for cell in cell_list:
-                    normalized_title = normalize_tving_episode_title(cell.get('episodetitle', ''))
-                    episode_metadata = {
-                        'releasedate': parse_wavve_release_date(cell),
-                        'title': normalized_title,
-                        'episodenumber': str(cell.get('episodenumber') or '').strip(),
-                    }
+                    episode_metadata = build_wavve_episode_metadata(cell)
+                    normalized_title = episode_metadata['title']
                     metadata_by_title[normalized_title] = episode_metadata
                     episode_number = episode_metadata['episodenumber']
                     if episode_number:
