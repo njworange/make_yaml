@@ -1,7 +1,7 @@
 from flask import render_template, jsonify
 from plugin import PluginModuleBase
 from tool import ToolUtil
-from .providers.legacy_registry import get_ottcode_class
+from .providers.legacy_registry import get_ottcode_class, is_command_enabled
 from .services.input_service import build_direct_code, get_site_name, resolve_search_keyword, resolve_search_parts
 from .services.schema_validator import has_korean_last_episode, has_show_data
 from .setup import P
@@ -171,6 +171,7 @@ class ModuleMain(PluginModuleBase):
         
     def process_command(self, command, arg1, arg2, arg3, req):
         self.code = ''
+        ottcode = None
         arg1 = arg1.strip()
         if command == 'search_keyword':
             self.code, ottcode = resolve_search_keyword(arg1)
@@ -204,15 +205,13 @@ class ModuleMain(PluginModuleBase):
                                 print("오류발생:", target)
                                 continue
 
-        elif command == 'wavve_code':
-            self.code = 'KW'+arg1
-        elif command == 'tving_code':
-            self.code = 'KV'+arg1
-        elif command == 'cpang_code':
-            self.code = 'KC'+arg1
-        elif command == 'nf_code':
-            self.code = 'FN'+arg1
+        elif command in ['wavve_code', 'tving_code', 'cpang_code', 'nf_code', 'amzn_code', 'atvp_code', 'ebskids_code']:
+            if not is_command_enabled(command):
+                return jsonify({"msg":"현재 지원하지 않는 OTT", "ret":"fail"})
+            self.code = build_direct_code(command, arg1)
         elif command == 'dsnp_code':
+            if not is_command_enabled(command):
+                return jsonify({"msg":"현재 지원하지 않는 OTT", "ret":"fail"})
             needs_redirect = 'disneyplus.com' in arg1 or arg1.startswith('entity-')
             logger.debug(f"DSNP command received arg1={arg1} arg2={arg2} needs_redirect_initial={needs_redirect} is_entity={self.is_disney_entity_code(arg1)}")
             if not needs_redirect and self.is_disney_entity_code(arg1):
@@ -235,7 +234,7 @@ class ModuleMain(PluginModuleBase):
                 return jsonify({'ret':'success', 'json': show_data})
             elif has_show_data(show_data):
                 if has_korean_last_episode(show_data):
-                    if P.ModelSetting.get_bool('is_primary'):
+                    if P.ModelSetting.get_bool('is_primary') and ottcode is not None:
                         self.tmdb_code = 'FT'+str(ottcode.tmdb_search()) 
                         show_data = YAMLUTILS.tmdb_data(self.tmdb_code, show_data)
                     YAMLUTILS.make_yaml(show_data)
