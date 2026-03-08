@@ -96,6 +96,10 @@ class ModuleMain(PluginModuleBase):
             logger.error(f"Exception:{str(e)}")
             logger.error(traceback.format_exc())
         return fallback_code
+
+    def is_disney_entity_code(self, code):
+        code = re.sub(r'^entity-', '', code.strip())
+        return re.match(r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$', code) is not None
         
     def process_command(self, command, arg1, arg2, arg3, req):
         self.code = ''
@@ -155,10 +159,14 @@ class ModuleMain(PluginModuleBase):
             self.code = 'FN'+arg1
         elif command == 'dsnp_code':
             needs_redirect = 'disneyplus.com' in arg1 or arg1.startswith('entity-')
-            if not needs_redirect and re.match(r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$', arg1):
+            if not needs_redirect and self.is_disney_entity_code(arg1):
                 needs_redirect = True
             if needs_redirect:
                 arg1 = self.disney_redirect(arg1)
+                if self.is_disney_entity_code(arg1):
+                    if arg2 == 'test':
+                        return jsonify({'ret':'fail', 'msg':'디즈니 시리즈 코드 확인 실패', 'json': []})
+                    return jsonify({'msg':'검색 실패', 'ret':'fail'})
             self.code = 'FD'+arg1
         elif command == 'amzn_code':
             self.code = 'FP'+arg1
