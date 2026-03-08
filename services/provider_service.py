@@ -1,10 +1,58 @@
 import copy
+import re
 import traceback
+from datetime import datetime
 
 from ..providers.legacy_registry import get_provider_class
 from ..setup import P
 
 logger = P.logger
+
+KOREAN_WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
+
+
+def extract_date_from_tving_thumb(url):
+    if not url:
+        return ''
+    match = re.search(r'/(20\d{2})(\d{2})(\d{2})/', url)
+    if not match:
+        return ''
+    return f'{match.group(1)}-{match.group(2)}-{match.group(3)}'
+
+
+def format_korean_broadcast_date(date_text):
+    if not date_text:
+        return ''
+    date_text = date_text[:10]
+    try:
+        parsed = datetime.strptime(date_text, '%Y-%m-%d')
+        return f"{parsed:%Y.%m.%d}({KOREAN_WEEKDAYS[parsed.weekday()]})"
+    except ValueError:
+        return ''
+
+
+def normalize_tving_episode_title(title):
+    title = (title or '').strip()
+    return re.sub(r'^\d+\.\s*', '', title)
+
+
+def normalize_tving_show_data(show_data):
+    if not isinstance(show_data, dict):
+        return show_data
+    for season in show_data.get('seasons', []):
+        for episode in season.get('episodes', []):
+            original_title = normalize_tving_episode_title(episode.get('title', ''))
+            air_date = (episode.get('originally_available_at') or '').strip()
+            if not air_date:
+                air_date = extract_date_from_tving_thumb(episode.get('thumbs', ''))
+                if air_date:
+                    episode['originally_available_at'] = air_date
+            date_prefix = format_korean_broadcast_date(air_date)
+            if date_prefix and original_title:
+                episode['title'] = f'{date_prefix} {original_title}'
+            elif original_title:
+                episode['title'] = original_title
+    return show_data
 
 
 def get_show_data(code):
@@ -15,6 +63,8 @@ def get_show_data(code):
         logger.debug(f"YAMLUTILS get_data parsed site={site} code={site_code}")
         provider_class = get_provider_class(site)
         show_data = provider_class.make_data(site_code)
+        if site == 'KV':
+            show_data = normalize_tving_show_data(show_data)
         if isinstance(show_data, dict):
             logger.debug(f"YAMLUTILS get_data result site={site} type=dict keys={list(show_data.keys())} seasons={len(show_data.get('seasons', []))}")
         elif isinstance(show_data, list):

@@ -1,5 +1,5 @@
 title: "make_yaml"
-version: "1.0.5"
+version: "1.0.6"
 package_name: "make_yaml"
 developer: "kihyyo"
 description: "OTT 정보로 직접 yaml로 만드는 플러그인"
