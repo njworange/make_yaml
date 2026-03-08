@@ -12,6 +12,16 @@ from ..services.provider_service import get_show_data
 logger = P.logger
 OTTCODE = get_ottcode_class()
 
+DISNEY_HEADERS = {
+    "sec-ch-ua-platform": "\"Windows\"",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+    "Content-Type": "text/plain;charset=UTF-8",
+    "Origin": "https://www.disneyplus.com",
+    "Referer": "https://www.disneyplus.com/",
+}
+DISNEY_PAGE_LOCALES = ('ko-kr', 'en-kr')
+
 
 def is_disney_entity_code(code):
     code = re.sub(r'^entity-', '', code.strip())
@@ -73,8 +83,22 @@ def build_title_variants(title):
     return unique
 
 
-def resolve_candidate_code(title, year):
-    variants = build_title_variants(title)
+def build_title_candidates(titles):
+    if isinstance(titles, str):
+        titles = [titles]
+    candidates = []
+    seen = set()
+    for title in titles or []:
+        for variant in build_title_variants(title):
+            key = title_key(variant)
+            if key and key not in seen:
+                candidates.append(variant)
+                seen.add(key)
+    return candidates
+
+
+def resolve_candidate_code(titles, year):
+    variants = build_title_candidates(titles)
     if not variants or OTTCODE is None:
         return None, None
     for variant in variants:
@@ -91,17 +115,106 @@ def resolve_candidate_code(title, year):
     return None, None
 
 
-def resolve_code_from_html(html, fallback_code):
-    title, description, year = extract_page_metadata(html)
-    normalized_title = normalize_title(title)
-    logger.debug(f"DSNP HTML metadata title={normalized_title} year={year} description_len={len(description)} fallback_code={fallback_code}")
-    if not normalized_title:
+def extract_build_id(html):
+    patterns = [
+        r'/_next/data/([^/]+)/',
+        r'"buildId":"([^"]+)"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ''
+
+
+def make_entity_url(entity_code, locale='ko-kr'):
+    entity_code = re.sub(r'^entity-', '', entity_code.strip())
+    return f'https://www.disneyplus.com/{locale}/browse/entity-{entity_code}'
+
+
+def fetch_page(url):
+    try:
+        response = requests.get(url, headers=DISNEY_HEADERS, allow_redirects=True, timeout=10)
+        return response
+    except Exception as e:
+        logger.error(f"Exception:{str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+def fetch_next_data_titles(entity_code, html):
+    build_id = extract_build_id(html)
+    if not build_id:
+        return []
+    titles = []
+    for locale in DISNEY_PAGE_LOCALES:
+        next_url = f'https://www.disneyplus.com/_next/data/{build_id}/{locale}/browse/entity-{entity_code}.json'
+        try:
+            response = requests.get(next_url, headers=DISNEY_HEADERS, allow_redirects=True, timeout=10)
+            if not response.ok:
+                logger.debug(f"DSNP next data fetch miss locale={locale} status={response.status_code}")
+                continue
+            title, _, _ = extract_page_metadata(response.text)
+            normalized_title = normalize_title(title)
+            logger.debug(f"DSNP next data locale={locale} title={normalized_title}")
+            if normalized_title:
+                titles.append(normalized_title)
+        except Exception as e:
+            logger.error(f"Exception:{str(e)}")
+            logger.error(traceback.format_exc())
+    return titles
+
+
+def collect_page_metadata_titles(fallback_code, primary_response):
+    titles = []
+    years = []
+    responses = []
+    if primary_response is not None:
+        responses.append(('primary', primary_response))
+
+    for locale in DISNEY_PAGE_LOCALES:
+        locale_url = make_entity_url(fallback_code, locale)
+        if primary_response is not None and primary_response.url.split('?', 1)[0] == locale_url:
+            continue
+        response = fetch_page(locale_url)
+        if response is not None:
+            responses.append((locale, response))
+
+    for source, response in responses:
+        title, description, year = extract_page_metadata(response.text)
+        normalized_title = normalize_title(title)
+        logger.debug(
+            f"DSNP metadata source={source} final_url={response.url.split('?', 1)[0]} "
+            f"title={normalized_title} year={year} description_len={len(description)} fallback_code={fallback_code}"
+        )
+        if normalized_title:
+            titles.append(normalized_title)
+        if year:
+            years.append(year)
+        for next_title in fetch_next_data_titles(fallback_code, response.text):
+            if next_title:
+                titles.append(next_title)
+
+    unique_titles = []
+    seen_titles = set()
+    for title in titles:
+        key = title_key(title)
+        if key and key not in seen_titles:
+            unique_titles.append(title)
+            seen_titles.add(key)
+    year = years[0] if years else ''
+    return unique_titles, year
+
+
+def resolve_code_from_titles(titles, year, fallback_code):
+    logger.debug(f"DSNP title candidates={titles} year={year} fallback_code={fallback_code}")
+    if not titles:
         return None
     try:
-        resolved, matched_title = resolve_candidate_code(normalized_title, year)
+        resolved, matched_title = resolve_candidate_code(titles, year)
         if resolved and resolved.startswith('FD'):
             show_data = get_show_data(resolved)
-            expected_key = title_key(matched_title or normalized_title)
+            expected_key = title_key(matched_title or titles[0])
             candidate_titles = []
             if isinstance(show_data, dict):
                 candidate_titles.extend([
@@ -117,6 +230,11 @@ def resolve_code_from_html(html, fallback_code):
         logger.error(f"Exception:{str(e)}")
         logger.error(traceback.format_exc())
     return None
+
+
+def resolve_code_from_page_sources(primary_response, fallback_code):
+    titles, year = collect_page_metadata_titles(fallback_code, primary_response)
+    return resolve_code_from_titles(titles, year, fallback_code)
 
 
 def resolve_input(code):
@@ -140,16 +258,8 @@ def resolve_input(code):
         request_url = url
     logger.debug(f"DSNP redirect prepared fallback={fallback_code} request_url={request_url}")
 
-    headers = {
-        "sec-ch-ua-platform": "\"Windows\"",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-        "Content-Type": "text/plain;charset=UTF-8",
-        "Origin": "https://www.disneyplus.com",
-        "Referer": "https://www.disneyplus.com/",
-    }
     try:
-        response = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+        response = requests.get(url, headers=DISNEY_HEADERS, allow_redirects=True, timeout=10)
         logger.debug(f"DSNP redirect response final_url={response.url.split('?', 1)[0]} history={len(response.history)}")
         match = re.search(r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&/]+)', response.url)
         if match:
@@ -159,9 +269,9 @@ def resolve_input(code):
         if match:
             browse_code = match.group('code').replace('entity-', '', 1)
             logger.debug(f"DSNP redirect browse fallback code={browse_code}")
-            resolved_code = resolve_code_from_html(response.text, browse_code)
+            resolved_code = resolve_code_from_page_sources(response, browse_code)
             if resolved_code:
-                logger.debug(f"DSNP redirect resolved code from HTML={resolved_code}")
+                logger.debug(f"DSNP redirect resolved code from metadata={resolved_code}")
                 return resolved_code
             return browse_code
     except Exception as e:
