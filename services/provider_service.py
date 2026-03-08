@@ -345,8 +345,9 @@ def build_appletv_show_data(show_id):
     title = decode_ebs_text(series_schema.get('name') or extract_appletv_meta_content(page_html, 'apple:title'))
     title = re.sub(r'\s*보기\s*-\s*Apple\s*TV$', '', title).strip()
     summary = decode_ebs_text(series_schema.get('description') or extract_appletv_meta_content(page_html, 'description'))
+    season_blocks = extract_appletv_season_blocks(page_html)
     seasons = []
-    for season_title, season_body in extract_appletv_season_blocks(page_html):
+    for season_title, season_body in season_blocks:
         season_number_match = re.search(r'(\d+)', season_title)
         season_index = int(season_number_match.group(1)) if season_number_match else len(seasons) + 1
         episodes = extract_appletv_episodes(season_body)
@@ -369,7 +370,17 @@ def build_appletv_show_data(show_id):
                 'summary': '',
                 'episodes': current_episodes,
             })
+    logger.debug(
+        f"AppleTV parse show_id={show_id} title={bool(title)} summary={bool(summary)} "
+        f"schema={bool(series_schema)} season_blocks={len(season_blocks)} seasons={len(seasons)}"
+    )
     if not seasons:
+        if title or summary:
+            return {
+                'title': title or show_id,
+                'summary': summary,
+                'seasons': [],
+            }
         return None
     show_data = {
         'title': title,
@@ -674,7 +685,9 @@ def get_show_data(code):
                 logger.error(f"Exception:{str(e)}")
                 logger.error(traceback.format_exc())
         if show_data in (None, [], ''):
-            if provider_class is not None:
+            if site == 'FA':
+                logger.debug(f"AppleTV public parse empty; skipping legacy fallback site={site} code={site_code}")
+            elif provider_class is not None:
                 show_data = provider_class.make_data(site_code)
         if site == 'KV':
             show_data = normalize_tving_show_data(show_data)
