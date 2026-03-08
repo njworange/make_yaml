@@ -62,6 +62,20 @@ class ModuleMain(PluginModuleBase):
             return None
             
     def disney_redirect(self, code):
+        code = code.strip()
+        fallback_code = code
+        if 'disneyplus.com' in code:
+            url = code
+            match = re.search(r'/series/.*?/(?P<code>[^?&#/]+)', code)
+            if match:
+                return match.group('code')
+            match = re.search(r'/browse/(?P<code>entity-[^?&#/]+)', code)
+            if match:
+                fallback_code = match.group('code').replace('entity-', '', 1)
+        else:
+            fallback_code = re.sub(r'^entity-', '', code)
+            url = 'https://www.disneyplus.com/ko-kr/browse/entity-' + fallback_code
+
         headers = {
             "sec-ch-ua-platform": "\"Windows\"",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -70,10 +84,18 @@ class ModuleMain(PluginModuleBase):
             "Origin": "https://www.disneyplus.com",
             "Referer": "https://www.disneyplus.com/",
         }
-        url = 'https://www.disneyplus.com/ko-kr/browse/entity-' + code
-        response = requests.get(url, headers=headers, allow_redirects=True)
-        code = re.search(r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&]+)', response.url).group('code')
-        return code
+        try:
+            response = requests.get(url, headers=headers, allow_redirects=True)
+            match = re.search(r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&/]+)', response.url)
+            if match:
+                return match.group('code')
+            match = re.search(r'/browse/(?P<code>entity-[^?&#/]+)', response.url)
+            if match:
+                return match.group('code').replace('entity-', '', 1)
+        except Exception as e:
+            logger.error(f"Exception:{str(e)}")
+            logger.error(traceback.format_exc())
+        return fallback_code
         
     def process_command(self, command, arg1, arg2, arg3, req):
         self.code = ''
@@ -132,7 +154,10 @@ class ModuleMain(PluginModuleBase):
         elif command == 'nf_code':
             self.code = 'FN'+arg1
         elif command == 'dsnp_code':
-            if len(arg1) > 20 and '-' in arg1:
+            needs_redirect = 'disneyplus.com' in arg1 or arg1.startswith('entity-')
+            if not needs_redirect and re.match(r'^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$', arg1):
+                needs_redirect = True
+            if needs_redirect:
                 arg1 = self.disney_redirect(arg1)
             self.code = 'FD'+arg1
         elif command == 'amzn_code':
