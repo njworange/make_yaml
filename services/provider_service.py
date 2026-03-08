@@ -17,11 +17,60 @@ WAVVE_API_PARAMS = {
     'partner': 'pooq',
     'region': 'kor',
     'targetage': 'all',
-    'pooqzone': 'none',
-    'guid': 'none',
     'drm': 'wm',
     'client_version': '7.1.40',
 }
+WAVVE_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Origin': 'https://www.wavve.com',
+    'Referer': 'https://www.wavve.com/',
+}
+
+
+def log_wavve_http_error(response, context):
+    body = ''
+    try:
+        body = response.text[:300]
+    except Exception:
+        pass
+    logger.error(
+        f"Wavve {context} http_error status={response.status_code} "
+        f"url={response.url} body={body}"
+    )
+
+
+def create_wavve_session(program_id=None):
+    session = requests.Session()
+    session.headers.update(WAVVE_HEADERS)
+    referer = 'https://www.wavve.com/'
+    if program_id:
+        referer = f'https://www.wavve.com/player/vod?programid={program_id}'
+    session.headers['Referer'] = referer
+    return session
+
+
+def bootstrap_wavve_session(session, program_id):
+    params = dict(WAVVE_API_PARAMS)
+    try:
+        session.get(f'https://www.wavve.com/player/vod?programid={program_id}', timeout=10)
+        ip_response = session.get('https://apis.wavve.com/ip', params=params, timeout=10)
+        if ip_response.ok:
+            logger.debug(f"Wavve ip bootstrap program_id={program_id} ok")
+        guid_response = session.get('https://apis.wavve.com/guid/issue', params=params, timeout=10)
+        if guid_response.ok:
+            guid = (guid_response.json().get('guid') or '').strip()
+            if guid:
+                params['guid'] = guid
+                logger.debug(f"Wavve guid bootstrap program_id={program_id} guid={guid}")
+        knock_response = session.get('https://apis.wavve.com/knock', params=params, timeout=10)
+        if knock_response.ok:
+            logger.debug(f"Wavve knock bootstrap program_id={program_id} ok")
+    except Exception as e:
+        logger.error(f"Exception:{str(e)}")
+        logger.error(traceback.format_exc())
+    return params
 
 
 def parse_wavve_release_date(cell):
@@ -37,12 +86,16 @@ def parse_wavve_release_date(cell):
 
 
 def extract_wavve_orderby(program_id):
+    session = create_wavve_session(program_id)
+    params = bootstrap_wavve_session(session, program_id)
     try:
-        response = requests.get(
+        response = session.get(
             'https://apis.wavve.com/fz/vod/programs/landing',
-            params={**WAVVE_API_PARAMS, 'history': 'all', 'programid': program_id},
+            params={**params, 'history': 'all', 'programid': program_id},
             timeout=10,
         )
+        if not response.ok:
+            log_wavve_http_error(response, 'landing')
         response.raise_for_status()
         payload = response.json()
         for tab in payload.get('landing_list', {}).get('tab', []):
@@ -83,6 +136,8 @@ def normalize_tving_episode_title(title):
 
 
 def fetch_wavve_episode_metadata(program_id, episode_count):
+    session = create_wavve_session(program_id)
+    base_params = bootstrap_wavve_session(session, program_id)
     metadata_by_title = {}
     metadata_by_index = {}
     limit = min(max(episode_count, 1), 100)
@@ -95,11 +150,13 @@ def fetch_wavve_episode_metadata(program_id, episode_count):
         offset = 0
         while len(metadata_by_index) < episode_count:
             try:
-                response = requests.get(
+                response = session.get(
                     f'https://apis.wavve.com/fz/vod/programs/{program_id}/contents',
-                    params={**WAVVE_API_PARAMS, 'limit': limit, 'offset': offset, 'orderby': orderby},
+                    params={**base_params, 'limit': limit, 'offset': offset, 'orderby': orderby},
                     timeout=10,
                 )
+                if not response.ok:
+                    log_wavve_http_error(response, f'contents orderby={orderby} offset={offset}')
                 response.raise_for_status()
                 payload = response.json()
                 cell_list = payload.get('cell_toplist', {}).get('celllist', [])
