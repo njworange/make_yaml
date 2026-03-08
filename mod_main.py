@@ -1,26 +1,16 @@
 from flask import render_template, jsonify
 from plugin import PluginModuleBase
 from tool import ToolUtil
+from .providers.legacy_registry import get_ottcode_class
+from .services.input_service import build_direct_code, get_site_name, resolve_search_keyword, resolve_search_parts
+from .services.schema_validator import has_korean_last_episode, has_show_data
 from .setup import P
-from support_site import SiteUtil
 from .yaml_utils import YAMLUTILS
 import re, os, traceback
 import requests
 from html import unescape
 logger = P.logger
-DEFINE_DEV = False
-if os.path.exists(os.path.join(os.path.dirname(__file__), 'get_code.py')):
-    DEFINE_DEV = True
-try:
-    if DEFINE_DEV:
-        from .get_code import OTTCODE
-    else:
-        from support import SupportSC
-        OTTCODE = SupportSC.load_module_P(P, 'get_code').OTTCODE
-
-except Exception as e:
-    P.logger.error(f'Exception:{str(e)}')
-    P.logger.error(traceback.format_exc())
+OTTCODE = get_ottcode_class()
 
 name = 'main'
 
@@ -183,18 +173,8 @@ class ModuleMain(PluginModuleBase):
         self.code = ''
         arg1 = arg1.strip()
         if command == 'search_keyword':
-            keyword = arg1.split('|')
-            if len(keyword) == 1:
-                ottcode = OTTCODE(keyword[0].strip())
-                ottcode_list = ottcode.get_ott_code()
-                user_order = P.ModelSetting.get_list('ftv_first_order', ',')
-                self.code = YAMLUTILS.code_sort(user_order, ottcode_list)
-            elif len(keyword) == 2:
-                ottcode = OTTCODE(keyword[0].strip(), keyword[1].strip())
-                ottcode_list = ottcode.get_ott_code()
-                user_order = P.ModelSetting.get_list('ftv_first_order', ',')
-                self.code = YAMLUTILS.code_sort(user_order, ottcode_list)
-            else:
+            self.code, ottcode = resolve_search_keyword(arg1)
+            if self.code is None:
                 return jsonify({"msg":"검색어 실패", "ret":"fail"})
         elif command == 'auto_target':
             source = arg1
@@ -213,13 +193,10 @@ class ModuleMain(PluginModuleBase):
                                     keyword = self.convert_title_format(folder)
                                     keyword = keyword.split('|')
                                     if keyword:
-                                        ottcode = OTTCODE(keyword[0].strip(), keyword[1].strip())
-                                        ottcode_list = ottcode.get_ott_code()
-                                        user_order = P.ModelSetting.get_list('ftv_first_order', ',')
-                                        self.code = YAMLUTILS.code_sort(user_order, ottcode_list)
+                                        self.code, ottcode = resolve_search_parts(keyword)
                                         if self.code:
                                             show_data = YAMLUTILS.get_data(self.code)
-                                            if SiteUtil.is_include_hangul(show_data['seasons'][-1]['episodes'][-1]['title']) or SiteUtil.is_include_hangul(show_data['seasons'][-1]['episodes'][-1]['summary']) :
+                                            if has_korean_last_episode(show_data):
                                                 YAMLUTILS.make_yaml(show_data, target)
                                         else:
                                             continue
@@ -248,30 +225,23 @@ class ModuleMain(PluginModuleBase):
                         return jsonify({'ret':'fail', 'msg':'디즈니 시리즈 코드 확인 실패', 'json': []})
                     return jsonify({'msg':'검색 실패', 'ret':'fail'})
             self.code = 'FD'+arg1
-        elif command == 'amzn_code':
-            self.code = 'FP'+arg1
-        elif command == 'atvp_code':
-            self.code = 'FA'+arg1
-        elif command == 'ebskids_code':
-            self.code = 'KE'+arg1
+        else:
+            self.code = build_direct_code(command, arg1)
         if self.code != '' and self.code != None :
             site = self.code[:2]
-            site_name_dict = {
-                'KW' : '웨이브', 'KV' : '티빙', 'KC' : '쿠팡 플레이', 'FN' : '넷플릭스', 'FD' : '디즈니 플러스', 'FP' : '프라임 비디오', 'FA' : '애플TV', 'KE' : 'EBS',
-            }
             logger.debug(f"Command {command} executing code={self.code} mode={arg2}")
             show_data = YAMLUTILS.get_data(self.code)
             if arg2 == 'test':
                 return jsonify({'ret':'success', 'json': show_data})
-            elif show_data !=[]:
-                if SiteUtil.is_include_hangul(show_data['seasons'][-1]['episodes'][-1]['title']) or SiteUtil.is_include_hangul(show_data['seasons'][-1]['episodes'][-1]['summary']) :
+            elif has_show_data(show_data):
+                if has_korean_last_episode(show_data):
                     if P.ModelSetting.get_bool('is_primary'):
                         self.tmdb_code = 'FT'+str(ottcode.tmdb_search()) 
                         show_data = YAMLUTILS.tmdb_data(self.tmdb_code, show_data)
                     YAMLUTILS.make_yaml(show_data)
-                    return jsonify({"msg":f"{site_name_dict[site]} 코드 실행", "ret":"success"})
+                    return jsonify({"msg":f"{get_site_name(site)} 코드 실행", "ret":"success"})
                 else:
-                    return jsonify({"msg":f"{site_name_dict[site]} 한글 메타데이터 아님", "ret":"fail"})
+                    return jsonify({"msg":f"{get_site_name(site)} 한글 메타데이터 아님", "ret":"fail"})
             else:
                 return jsonify({"msg":"검색 실패", "ret":"fail"})
         else:
