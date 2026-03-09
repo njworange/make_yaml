@@ -422,29 +422,60 @@ def normalize_prime_episode_title(title):
 
 def extract_prime_episodes(page_html):
     page_text = extract_prime_text(page_html)
+    lines = [line.strip() for line in page_text.split('\n') if line.strip()]
     episodes = []
-    pattern = re.compile(
-        r'(?P<label>시즌\s*\d+\s*에피소드\s*(?P<index>\d+)\s*-\s*.*?)\n'
-        r'(?P<date>20\d{2}년\s*\d{1,2}월\s*\d{1,2}일)\n'
-        r'(?P<runtime>(?:\d+시간\s*\d+분|\d+시간|\d+분))\n'
-        r'(?:(?P<rating>[^\n]*)\n)?'
-        r'(?P<summary>.*?)(?:\n프라임 가입하기|\n탐색|\n연관 내용|\n세부 정보|\n고객들이 시청한 다른 작품|\nStore Filled프라임 가입하기)',
-        flags=re.S,
-    )
     season_index = None
-    for match in pattern.finditer(page_text):
-        title = normalize_prime_episode_title(match.group('label'))
-        air_date = normalize_prime_date(match.group('date'))
-        season_match = re.search(r'시즌\s*(\d+)\s*에피소드', match.group('label'))
-        if season_match and season_index is None:
-            season_index = int(season_match.group(1))
+    label_pattern = re.compile(r'^시즌\s*(?P<season>\d+)\s*에피소드\s*(?P<index>\d+)\s*-\s*(?P<title>.+)$')
+    date_pattern = re.compile(r'^20\d{2}년\s*\d{1,2}월\s*\d{1,2}일$')
+    runtime_pattern = re.compile(r'^(?:\d+시간\s*\d+분|\d+시간|\d+분)$')
+    stop_lines = {
+        '에피소드', '탐색', '기타', '연관 내용', '세부 정보', '고객들이 시청한 다른 작품',
+        '세부 정보 정보 더 보기', '콘텐츠 설명이 프로그램에는 간접 광고가 포함되어 있습니다, 점멸 표시 등, Flashing lights and strobing patterns might affect photosensitive viewers',
+    }
+    noise_lines = {
+        'Store Filled', '프라임 가입하기', 'Store Filled프라임 가입하기', '프라임으로 보기',
+        'Add', '워치리스트', '좋아요', '마음에 들지 않음', 'Share Android', '공유하기',
+        '정렬', '최신 에피소드', '에피소드 번호',
+    }
+    i = 0
+    while i < len(lines):
+        label_match = label_pattern.match(lines[i])
+        if not label_match:
+            i += 1
+            continue
+        season_value = int(label_match.group('season'))
+        episode_index = int(label_match.group('index'))
+        title = normalize_prime_episode_title(lines[i])
+        if season_index is None:
+            season_index = season_value
+        air_date = ''
+        runtime = 0
+        summary_lines = []
+        j = i + 1
+        if j < len(lines) and date_pattern.match(lines[j]):
+            air_date = normalize_prime_date(lines[j])
+            j += 1
+        if j < len(lines) and runtime_pattern.match(lines[j]):
+            runtime = normalize_prime_duration(lines[j])
+            j += 1
+        if j < len(lines) and (re.match(r'^(전체|\d+\+|PG|TV-|15|18|7\+)', lines[j]) or '등급' in lines[j]):
+            j += 1
+        while j < len(lines):
+            if label_pattern.match(lines[j]):
+                break
+            if lines[j] in stop_lines:
+                break
+            if lines[j] not in noise_lines:
+                summary_lines.append(lines[j])
+            j += 1
         episodes.append({
-            'index': int(match.group('index')),
+            'index': episode_index,
             'title': f"{format_korean_broadcast_date(air_date)} {title}" if air_date and title else title,
-            'summary': decode_ebs_text(match.group('summary')),
-            'runtime': normalize_prime_duration(match.group('runtime')),
+            'summary': decode_ebs_text(' '.join(summary_lines)),
+            'runtime': runtime,
             'originally_available_at': air_date,
         })
+        i = j
     return {
         'season_index': season_index,
         'episodes': episodes,
