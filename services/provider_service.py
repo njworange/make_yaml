@@ -505,6 +505,12 @@ def enrich_appletv_episode(episode):
             image_url = decode_ebs_text(episode_schema.get('image') or '')
             if image_url:
                 episode['thumbs'] = image_url
+        original_title = re.sub(r'^20\d{2}\.\d{2}\.\d{2}\([월화수목금토일]\)\s*', '', (episode.get('title') or '').strip())
+        date_prefix = format_korean_broadcast_date(episode.get('originally_available_at', ''))
+        if date_prefix and original_title:
+            episode['title'] = f'{date_prefix} {original_title}'
+        elif original_title:
+            episode['title'] = original_title
     except Exception as e:
         logger.error(f"Exception:{str(e)}")
         logger.error(traceback.format_exc())
