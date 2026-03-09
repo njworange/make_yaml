@@ -449,14 +449,12 @@ def extract_prime_episodes(page_html):
         if season_index is None:
             season_index = season_value
         air_date = ''
-        runtime = 0
         summary_lines = []
         j = i + 1
         if j < len(lines) and date_pattern.match(lines[j]):
             air_date = normalize_prime_date(lines[j])
             j += 1
         if j < len(lines) and runtime_pattern.match(lines[j]):
-            runtime = normalize_prime_duration(lines[j])
             j += 1
         if j < len(lines) and (re.match(r'^(전체|\d+\+|PG|TV-|15|18|7\+)', lines[j]) or '등급' in lines[j]):
             j += 1
@@ -472,7 +470,6 @@ def extract_prime_episodes(page_html):
             'index': episode_index,
             'title': f"{format_korean_broadcast_date(air_date)} {title}" if air_date and title else title,
             'summary': decode_ebs_text(' '.join(summary_lines)),
-            'runtime': runtime,
             'originally_available_at': air_date,
         })
         i = j
