@@ -38,6 +38,17 @@ APPLE_TV_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
 }
+APPLE_TV_UTS_PARAMS = {
+    'caller': 'web',
+    'includeSeasonSummary': 'false',
+    'locale': 'ko-KR',
+    'pfm': 'web',
+    'selectedSeasonEpisodesOnly': 'false',
+    'sf': '143466',
+    'utscf': 'OjAAAAEAAAAAAAMAEAAAACMAKwAtAC8A',
+    'utsk': '6e3013c6d6fae3c2::::::00b164cc451c7be6',
+    'v': '92',
+}
 
 
 def extract_ebs_program_id(value):
@@ -87,6 +98,12 @@ def fetch_appletv_html(url):
     response = requests.get(url, headers=APPLE_TV_HEADERS, timeout=15)
     response.raise_for_status()
     return decode_response_html(response)
+
+
+def fetch_appletv_json(url, params=None):
+    response = requests.get(url, headers=APPLE_TV_HEADERS, params=params, timeout=15)
+    response.raise_for_status()
+    return response.json()
 
 
 def extract_ebs_meta_content(page_html, property_name):
@@ -273,6 +290,55 @@ def normalize_appletv_duration(value):
     return 0
 
 
+def normalize_appletv_date(value):
+    text = decode_ebs_text(value)
+    match = re.search(r'(20\d{2})-(\d{2})-(\d{2})', text)
+    if match:
+        return f'{match.group(1)}-{match.group(2)}-{match.group(3)}'
+    text = str(value or '').strip()
+    if text.isdigit():
+        try:
+            return datetime.utcfromtimestamp(int(text) / 1000).strftime('%Y-%m-%d')
+        except Exception:
+            return ''
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.utcfromtimestamp(float(value) / 1000).strftime('%Y-%m-%d')
+        except Exception:
+            return ''
+    return ''
+
+
+def extract_appletv_src_from_srcset(srcset):
+    candidates = []
+    for part in str(srcset or '').split(','):
+        token = part.strip().split(' ')[0].strip()
+        if token:
+            candidates.append(token)
+    return candidates[-1] if candidates else ''
+
+
+def extract_appletv_code_from_url(url):
+    match = re.search(r'/(umc\.[a-z]+\.[A-Za-z0-9]+)(?:\?|$)', str(url or ''))
+    if match:
+        return match.group(1)
+    return ''
+
+
+def normalize_appletv_image_url(image_data):
+    if isinstance(image_data, dict):
+        template = str(image_data.get('url') or '').strip()
+        width = int(image_data.get('width') or 1200)
+        height = int(image_data.get('height') or 675)
+    else:
+        template = str(image_data or '').strip()
+        width = 1200
+        height = 675
+    if not template:
+        return ''
+    return template.replace('{w}', str(width)).replace('{h}', str(height)).replace('{f}', 'jpg')
+
+
 def extract_appletv_genres(page_html):
     match = re.search(r'<span class="metadata-list[^"]*"[^>]*>(?P<value>.*?)</span>', page_html, flags=re.S)
     if not match:
@@ -329,22 +395,128 @@ def extract_appletv_current_season_title(page_html):
     return '시즌 1'
 
 
+def extract_appletv_season_titles(page_html):
+    titles = []
+    seen_titles = set()
+    for match in re.finditer(r'<option[^>]*>(?P<title>\s*시즌\s*\d+\s*)</option>', page_html, flags=re.S):
+        title = decode_ebs_text(match.group('title'))
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+        titles.append(title)
+    return titles
+
+
 def extract_appletv_episodes(season_html):
     episodes = []
     pattern = re.compile(
+        r'<a[^>]+href="(?P<href>https://tv\.apple\.com/[^"]+/episode/[^"]+)"[^>]*>.*?'
+        r'(?:<source[^>]+srcset="(?P<srcset>[^"]+)"[^>]*>.*?)?'
         r'<div class="tag[^"]*">에피소드\s*(?P<index>\d+)</div>\s*<div class="title[^"]*">(?P<title>.*?)</div>\s*<div class="description[^"]*">(?P<summary>.*?)</div>.*?<div class="duration[^"]*"[^>]*>(?P<duration>.*?)</div>',
         flags=re.S,
     )
     for match in pattern.finditer(season_html):
+        episode_url = html.unescape(match.group('href'))
         episodes.append({
             'index': int(match.group('index')),
             'title': decode_ebs_text(match.group('title')),
             'summary': decode_ebs_text(match.group('summary')),
             'runtime': normalize_appletv_duration(match.group('duration')),
-            'thumbs': '',
+            'thumbs': extract_appletv_src_from_srcset(html.unescape(match.group('srcset') or '')),
             'originally_available_at': '',
+            'code': extract_appletv_code_from_url(episode_url),
+            'url': episode_url,
         })
     return episodes
+
+
+def fetch_appletv_api_episodes(show_id, page_size=10, max_pages=100):
+    episodes = []
+    seen_codes = set()
+    total_episode_count = 0
+    for page_index in range(max_pages):
+        next_token = f'{page_index * page_size}:{page_size}'
+        payload = fetch_appletv_json(
+            f'https://tv.apple.com/api/uts/v3/shows/{show_id}/episodes',
+            params={**APPLE_TV_UTS_PARAMS, 'nextToken': next_token},
+        )
+        data = payload.get('data') or {}
+        total_episode_count = int(data.get('totalEpisodeCount') or total_episode_count or 0)
+        page_episodes = data.get('episodes') or []
+        if not page_episodes:
+            break
+        added_count = 0
+        for item in page_episodes:
+            episode_code = extract_appletv_code_from_url(item.get('url') or '') or str(item.get('id') or '').strip()
+            if not episode_code or episode_code in seen_codes:
+                continue
+            seen_codes.add(episode_code)
+            added_count += 1
+            images = item.get('images') or {}
+            episode_url = item.get('url') or ''
+            episodes.append({
+                'index': int(item.get('episodeNumber') or item.get('episodeIndex') or len(episodes) + 1),
+                'title': decode_ebs_text(item.get('title') or ''),
+                'summary': decode_ebs_text(item.get('description') or ''),
+                'runtime': int((item.get('duration') or 0) / 60) if item.get('duration') else 0,
+                'thumbs': normalize_appletv_image_url(images.get('contentImage') or images.get('posterArt') or ''),
+                'originally_available_at': normalize_appletv_date(item.get('releaseDate')),
+                'code': episode_code,
+                'url': episode_url,
+                'season_number': int(item['seasonNumber']) if item.get('seasonNumber') is not None else 1,
+            })
+        if added_count == 0:
+            break
+        if total_episode_count and len(seen_codes) >= total_episode_count:
+            break
+    return episodes
+
+
+def build_appletv_seasons_from_api(show_id):
+    api_episodes = fetch_appletv_api_episodes(show_id)
+    seasons_by_number = {}
+    for episode in api_episodes:
+        season_number = int(episode.pop('season_number', 1) or 1)
+        season = seasons_by_number.setdefault(season_number, {
+            'index': season_number,
+            'title': f'시즌 {season_number}',
+            'summary': '',
+            'episodes': [],
+        })
+        season['episodes'].append(episode)
+    seasons = []
+    for season_number in sorted(seasons_by_number):
+        season = seasons_by_number[season_number]
+        season['episodes'] = [
+            enrich_appletv_episode(episode)
+            for episode in sorted(season['episodes'], key=lambda item: item.get('index', 0))
+        ]
+        seasons.append(season)
+    return seasons
+
+
+def enrich_appletv_episode(episode):
+    episode_url = episode.get('url') or ''
+    if not episode_url:
+        return episode
+    try:
+        episode_html = fetch_appletv_html(episode_url)
+        episode_schema = extract_appletv_json_ld(episode_html, 'schema:tv-episode')
+        air_date = normalize_appletv_date(episode_schema.get('datePublished') or '')
+        if air_date:
+            episode['originally_available_at'] = air_date
+        if not episode.get('thumbs'):
+            image_url = decode_ebs_text(episode_schema.get('image') or '')
+            if image_url:
+                episode['thumbs'] = image_url
+        if not episode.get('code'):
+            episode['code'] = extract_appletv_code_from_url(episode_schema.get('url') or episode_url)
+    except Exception as e:
+        logger.error(f"Exception:{str(e)}")
+        logger.error(traceback.format_exc())
+    finally:
+        episode.pop('url', None)
+    return episode
 
 
 def build_appletv_show_data(show_id):
@@ -357,14 +529,23 @@ def build_appletv_show_data(show_id):
     title = decode_ebs_text(series_schema.get('name') or extract_appletv_meta_content(page_html, 'apple:title'))
     title = re.sub(r'\s*보기\s*-\s*Apple\s*TV$', '', title).strip()
     summary = decode_ebs_text(series_schema.get('description') or extract_appletv_meta_content(page_html, 'description'))
+    season_titles = extract_appletv_season_titles(page_html)
     season_blocks = extract_appletv_season_blocks(page_html)
     seasons = []
+    try:
+        seasons = build_appletv_seasons_from_api(show_id)
+    except Exception as e:
+        logger.error(f"Exception:{str(e)}")
+        logger.error(traceback.format_exc())
     for season_title, season_body in season_blocks:
+        if seasons:
+            break
         season_number_match = re.search(r'(\d+)', season_title)
         season_index = int(season_number_match.group(1)) if season_number_match else len(seasons) + 1
         episodes = extract_appletv_episodes(season_body)
         if not episodes:
             continue
+        episodes = [enrich_appletv_episode(episode) for episode in episodes]
         seasons.append({
             'index': season_index,
             'title': season_title,
@@ -375,6 +556,7 @@ def build_appletv_show_data(show_id):
         current_season_title = extract_appletv_current_season_title(page_html)
         current_episodes = extract_appletv_episodes(page_html)
         if current_episodes:
+            current_episodes = [enrich_appletv_episode(episode) for episode in current_episodes]
             season_number_match = re.search(r'(\d+)', current_season_title)
             seasons.append({
                 'index': int(season_number_match.group(1)) if season_number_match else 1,
@@ -384,17 +566,25 @@ def build_appletv_show_data(show_id):
             })
     logger.debug(
         f"AppleTV parse show_id={show_id} title={bool(title)} summary={bool(summary)} "
-        f"schema={bool(series_schema)} season_blocks={len(season_blocks)} seasons={len(seasons)}"
+        f"schema={bool(series_schema)} season_titles={len(season_titles)} "
+        f"season_blocks={len(season_blocks)} seasons={len(seasons)}"
     )
+    if season_titles and len(season_titles) > len(seasons):
+        logger.debug(
+            f"AppleTV detected additional seasons in selector show_id={show_id} "
+            f"selector_titles={season_titles} parsed_seasons={[season.get('title') for season in seasons]}"
+        )
     if not seasons:
         if title or summary:
             return {
+                'code': show_id,
                 'title': title or show_id,
                 'summary': summary,
                 'seasons': [],
             }
         return None
     show_data = {
+        'code': show_id,
         'title': title,
         'summary': summary,
         'seasons': seasons,
