@@ -164,6 +164,7 @@ def extract_ebs_default_course_id(page_html, program_id):
 def normalize_ebs_episode_title(title):
     title = decode_ebs_text(title)
     title = re.sub(r'^\d+\.\s*', '', title)
+    title = re.sub(r'^20\d{2}\.\d{2}\.\d{2}\([월화수목금토일]\)\s*', '', title)
     return title.strip()
 
 
@@ -178,14 +179,16 @@ def normalize_ebs_date(date_text):
 def extract_ebs_episodes(page_html):
     episodes = []
     pattern = re.compile(
-        r'<a\s+href="(?P<href>/vodCommon/show\?siteCd=AK&courseId=[^"]+&lectId=(?P<lect_id>[^&"]+)&stepId=(?P<step_id>[^"]+))".*?'
+        r'<a\s+href="(?P<href>/vodCommon/show\?[^"]*siteCd=AK[^"]*)".*?'
         r'<img\s+src="(?P<thumb>[^"]*)".*?'
         r'<p>(?P<title>.*?)</p>\s*<span>(?P<date>[^<]+)</span>',
         flags=re.S,
     )
     seen_lect_ids = set()
     for match in pattern.finditer(page_html):
-        lect_id = match.group('lect_id').strip()
+        href = html.unescape(match.group('href').strip())
+        lect_id_match = re.search(r'[?&]lectId=([^&"]+)', href)
+        lect_id = lect_id_match.group(1).strip() if lect_id_match else ''
         if not lect_id or lect_id in seen_lect_ids:
             continue
         seen_lect_ids.add(lect_id)
@@ -200,8 +203,61 @@ def extract_ebs_episodes(page_html):
             'thumbs': match.group('thumb').strip(),
             'originally_available_at': date_text,
             'code': lect_id,
+            '_detail_path': href,
         })
     return episodes
+
+
+def extract_ebs_episode_summary(page_html):
+    script_pattern = re.compile(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>\s*(?P<json>.*?)\s*</script>',
+        flags=re.S | re.I,
+    )
+    for match in script_pattern.finditer(page_html):
+        try:
+            payload = json.loads(match.group('json'))
+        except Exception:
+            continue
+        candidates = []
+        if isinstance(payload, list):
+            candidates.extend(payload)
+        elif isinstance(payload, dict):
+            candidates.append(payload)
+            graph = payload.get('@graph')
+            if isinstance(graph, list):
+                candidates.extend(graph)
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_type = candidate.get('@type')
+            candidate_types = candidate_type if isinstance(candidate_type, list) else [candidate_type]
+            if 'VideoObject' not in candidate_types:
+                continue
+            summary = decode_ebs_text(candidate.get('description') or '')
+            if summary:
+                return summary
+    return ''
+
+
+def enrich_ebs_episode(episode):
+    detail_path = episode.get('_detail_path') or ''
+    if detail_path:
+        try:
+            detail_html = fetch_ebs_html(f'https://anikids.ebs.co.kr{detail_path}')
+            summary = extract_ebs_episode_summary(detail_html)
+            if summary:
+                episode['summary'] = summary
+        except Exception as e:
+            logger.error(f"Exception:{str(e)}")
+            logger.error(traceback.format_exc())
+    original_title = normalize_ebs_episode_title(episode.get('title', ''))
+    date_prefix = format_korean_broadcast_date(episode.get('originally_available_at', ''))
+    if date_prefix and original_title:
+        episode['title'] = f'{date_prefix} {original_title}'
+    elif original_title:
+        episode['title'] = original_title
+    episode.pop('_detail_path', None)
+    return episode
 
 
 def build_ebs_show_data(program_id):
@@ -231,6 +287,7 @@ def build_ebs_show_data(program_id):
         episodes = extract_ebs_episodes(season_html)
         if not episodes:
             continue
+        episodes = [enrich_ebs_episode(episode) for episode in episodes]
         for episode in episodes:
             air_date = episode.get('originally_available_at') or ''
             if air_date and (not earliest_date or air_date < earliest_date):
