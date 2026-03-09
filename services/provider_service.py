@@ -38,6 +38,10 @@ APPLE_TV_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
 }
+PRIME_VIDEO_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+}
 APPLE_TV_UTS_PARAMS = {
     'caller': 'web',
     'includeSeasonSummary': 'false',
@@ -64,6 +68,17 @@ def extract_appletv_show_id(value):
     match = re.search(r'(umc\.cmc\.[A-Za-z0-9]+)', text)
     if match:
         return match.group(1)
+    return text
+
+
+def extract_prime_detail_code(value):
+    text = str(value or '').strip()
+    match = re.search(r'primevideo\.com\/(?:-\/[^/]+\/)?detail(?:\/[^/]+)?\/(?P<code>[A-Z0-9]{10,})', text)
+    if match:
+        return match.group('code')
+    match = re.search(r'(?P<code>[A-Z0-9]{10,})', text)
+    if match:
+        return match.group('code')
     return text
 
 
@@ -96,6 +111,12 @@ def fetch_ebs_html(url):
 
 def fetch_appletv_html(url):
     response = requests.get(url, headers=APPLE_TV_HEADERS, timeout=15)
+    response.raise_for_status()
+    return decode_response_html(response)
+
+
+def fetch_prime_html(url):
+    response = requests.get(url, headers=PRIME_VIDEO_HEADERS, timeout=15)
     response.raise_for_status()
     return decode_response_html(response)
 
@@ -307,6 +328,160 @@ def build_ebs_show_data(program_id):
     }
     if earliest_date:
         show_data['originally_available_at'] = earliest_date
+    return show_data
+
+
+def extract_prime_meta_content(page_html, property_name):
+    pattern = re.compile(r'<meta\b[^>]*>', flags=re.I | re.S)
+    name_pattern = re.compile(r'(?:property|name)=["\'](?P<key>.*?)["\']', flags=re.I | re.S)
+    content_pattern = re.compile(r'content=["\'](?P<value>.*?)["\']', flags=re.I | re.S)
+    for tag in pattern.finditer(page_html):
+        meta_tag = tag.group(0)
+        key_match = name_pattern.search(meta_tag)
+        content_match = content_pattern.search(meta_tag)
+        if not key_match or not content_match:
+            continue
+        if key_match.group('key').strip().lower() != property_name.lower():
+            continue
+        return decode_ebs_text(content_match.group('value'))
+    return ''
+
+
+def extract_prime_title(page_html):
+    candidates = []
+    title_match = re.search(r'<title>(?P<value>.*?)</title>', page_html, flags=re.I | re.S)
+    if title_match:
+        candidates.append(decode_ebs_text(title_match.group('value')))
+    candidates.append(extract_prime_meta_content(page_html, 'title'))
+    candidates.append(extract_prime_meta_content(page_html, 'og:title'))
+    for candidate in candidates:
+        title = candidate.strip()
+        if not title:
+            continue
+        title = re.sub(r'^(?:Prime Video|프라임 비디오):\s*', '', title)
+        title = re.sub(r'\s*-\s*(?:Season|시즌)\s*\d+\s*$', '', title, flags=re.I)
+        title = re.sub(r'\s+(?:Season|시즌)\s*\d+\s*-\s*프라임 비디오.*$', '', title, flags=re.I)
+        title = re.sub(r'\s*-\s*Prime Video.*$', '', title, flags=re.I)
+        title = re.sub(r'\s*-\s*프라임 비디오.*$', '', title, flags=re.I)
+        title = title.strip()
+        if title:
+            return title
+    return ''
+
+
+def extract_prime_season_index(page_html):
+    title_match = re.search(r'<title>(?P<value>.*?)</title>', page_html, flags=re.I | re.S)
+    title_text = decode_ebs_text(title_match.group('value')) if title_match else ''
+    for pattern in [r'(?:Season|시즌)\s*(\d+)', r'시즌\s*(\d+)']:
+        match = re.search(pattern, title_text, flags=re.I)
+        if match:
+            return int(match.group(1))
+    return 1
+
+
+def normalize_prime_date(date_text):
+    text = decode_ebs_text(date_text)
+    match = re.search(r'(20\d{2})년\s*(\d{1,2})월\s*(\d{1,2})일', text)
+    if match:
+        return f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+    return ''
+
+
+def normalize_prime_duration(duration_text):
+    text = decode_ebs_text(duration_text)
+    hour_match = re.search(r'(\d+)시간', text)
+    minute_match = re.search(r'(\d+)분', text)
+    hours = int(hour_match.group(1)) if hour_match else 0
+    minutes = int(minute_match.group(1)) if minute_match else 0
+    return hours * 60 + minutes
+
+
+def extract_prime_text(page_html):
+    text = html.unescape(str(page_html or ''))
+    text = re.sub(r'(?is)<script\b[^>]*>.*?</script>', ' ', text)
+    text = re.sub(r'(?is)<style\b[^>]*>.*?</style>', ' ', text)
+    text = re.sub(r'(?is)<noscript\b[^>]*>.*?</noscript>', ' ', text)
+    text = re.sub(r'(?i)<br\s*/?>', '\n', text)
+    text = re.sub(r'(?i)</(?:p|div|section|article|main|aside|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6|button)>', '\n', text)
+    text = re.sub(r'(?i)<[^>]+>', ' ', text)
+    text = text.replace('\r', '')
+    lines = []
+    for raw_line in text.split('\n'):
+        line = re.sub(r'\s+', ' ', raw_line.replace('\xa0', ' ')).strip()
+        if line:
+            lines.append(line)
+    return '\n'.join(lines)
+
+
+def normalize_prime_episode_title(title):
+    text = decode_ebs_text(title)
+    text = re.sub(r'^시즌\s*\d+\s*에피소드\s*\d+\s*-\s*', '', text)
+    text = re.sub(r'^20\d{2}\.\d{2}\.\d{2}\([월화수목금토일]\)\s*', '', text)
+    return text.strip()
+
+
+def extract_prime_episodes(page_html):
+    page_text = extract_prime_text(page_html)
+    episodes = []
+    pattern = re.compile(
+        r'(?P<label>시즌\s*\d+\s*에피소드\s*(?P<index>\d+)\s*-\s*.*?)\n'
+        r'(?P<date>20\d{2}년\s*\d{1,2}월\s*\d{1,2}일)\n'
+        r'(?P<runtime>(?:\d+시간\s*\d+분|\d+시간|\d+분))\n'
+        r'(?:(?P<rating>[^\n]*)\n)?'
+        r'(?P<summary>.*?)(?:\n프라임 가입하기|\n탐색|\n연관 내용|\n세부 정보|\n고객들이 시청한 다른 작품|\nStore Filled프라임 가입하기)',
+        flags=re.S,
+    )
+    season_index = None
+    for match in pattern.finditer(page_text):
+        title = normalize_prime_episode_title(match.group('label'))
+        air_date = normalize_prime_date(match.group('date'))
+        season_match = re.search(r'시즌\s*(\d+)\s*에피소드', match.group('label'))
+        if season_match and season_index is None:
+            season_index = int(season_match.group(1))
+        episodes.append({
+            'index': int(match.group('index')),
+            'title': f"{format_korean_broadcast_date(air_date)} {title}" if air_date and title else title,
+            'summary': decode_ebs_text(match.group('summary')),
+            'runtime': normalize_prime_duration(match.group('runtime')),
+            'originally_available_at': air_date,
+        })
+    return {
+        'season_index': season_index,
+        'episodes': episodes,
+    }
+
+
+def build_prime_show_data(detail_code):
+    detail_code = extract_prime_detail_code(detail_code)
+    if not detail_code:
+        return None
+    page_html = fetch_prime_html(f'https://www.primevideo.com/-/ko/detail/{detail_code}')
+    title = extract_prime_title(page_html)
+    summary = extract_prime_meta_content(page_html, 'description')
+    thumb = extract_prime_meta_content(page_html, 'og:image')
+    episode_payload = extract_prime_episodes(page_html)
+    episodes = episode_payload.get('episodes') or []
+    season_index = episode_payload.get('season_index') or extract_prime_season_index(page_html)
+    if not title or not summary or not episodes:
+        return None
+    show_data = {
+        'title': title,
+        'summary': summary,
+        'seasons': [],
+    }
+    season = {
+        'index': season_index,
+        'title': f'시즌 {season_index}',
+        'summary': '',
+        'episodes': episodes,
+    }
+    if thumb:
+        for episode in season['episodes']:
+            episode['thumbs'] = thumb
+    show_data['seasons'] = [season]
+    air_dates = [episode.get('originally_available_at') for episode in episodes if episode.get('originally_available_at')]
+    if air_dates:
+        show_data['originally_available_at'] = min(air_dates)
     return show_data
 
 
@@ -924,9 +1099,11 @@ def get_show_data(code):
             site_code = extract_ebs_program_id(site_code)
         elif site == 'FA':
             site_code = extract_appletv_show_id(site_code)
+        elif site == 'FP':
+            site_code = extract_prime_detail_code(site_code)
         logger.debug(f"YAMLUTILS get_data parsed site={site} code={site_code}")
         provider_class = get_provider_class(site)
-        if provider_class is None and site not in ['KE', 'FA']:
+        if provider_class is None and site not in ['KE', 'FA', 'FP']:
             return None
         show_data = None
         if site == 'KE':
@@ -941,10 +1118,18 @@ def get_show_data(code):
             except Exception as e:
                 logger.error(f"Exception:{str(e)}")
                 logger.error(traceback.format_exc())
+        elif site == 'FP':
+            try:
+                show_data = build_prime_show_data(site_code)
+            except Exception as e:
+                logger.error(f"Exception:{str(e)}")
+                logger.error(traceback.format_exc())
         if show_data in (None, [], ''):
             if site == 'FA':
                 logger.debug(f"AppleTV public parse empty; skipping legacy fallback site={site} code={site_code}")
-            elif provider_class is not None:
+            elif site == 'FP':
+                logger.debug(f"Prime public parse empty; falling back to legacy site={site} code={site_code}")
+            if site != 'FA' and provider_class is not None:
                 show_data = provider_class.make_data(site_code)
         if site == 'KV':
             show_data = normalize_tving_show_data(show_data)

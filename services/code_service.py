@@ -12,7 +12,7 @@ REGEX_BY_PROVIDER_KEY = {
     'nf': r'netflix\.com\/(kr\/title|title)\/(?P<code>[^/#]+)',
     'dsnp': r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&]+)',
     'atvp': r'apple.com/.*?(?P<code>umc.cmc.[a-zA-Z0-9]+)$',
-    'amzn': r'gti\.(?P<code>[a-zA-Z0-9-]+)',
+    'amzn': r'(?:gti\.(?P<code>[a-zA-Z0-9-]+)|primevideo\.com\/(?:-\/[^/]+\/)?detail(?:\/[^/]+)?\/(?P<code2>[A-Z0-9]{10,}))',
     'ebs': r'anikids\.ebs\.co\.kr\/anikids\/program\/show\/(?P<code>[A-Za-z0-9]+)',
 }
 
@@ -47,7 +47,7 @@ def sort_code(user_order, url_list):
             for url in url_list or []:
                 match = re.search(regex, url)
                 if match:
-                    return prefix + match.group('code')
+                    return prefix + (match.groupdict().get('code') or match.groupdict().get('code2'))
     except Exception as e:
         logger.error(f"Exception:{str(e)}")
         logger.error(traceback.format_exc())
