@@ -82,7 +82,7 @@ PROVIDER_METADATA = {
     'KW': {'command': 'wavve_code', 'display_name': '웨이브', 'module_name': 'site_wavve', 'class_name': 'WAVVE', 'user_order': 'WAVVE', 'enabled': True},
     'KV': {'command': 'tving_code', 'display_name': '티빙', 'module_name': 'site_tving', 'class_name': 'TVING', 'user_order': 'TVING', 'enabled': True},
     'KC': {'command': 'cpang_code', 'display_name': '쿠팡 플레이', 'module_name': 'site_coupang', 'class_name': 'COUPANG', 'user_order': 'COUPANG', 'enabled': False},
-    'FN': {'command': 'nf_code', 'display_name': '넷플릭스', 'module_name': 'site_netflix', 'class_name': 'NF', 'user_order': 'NF', 'enabled': False},
+    'FN': {'command': 'nf_code', 'display_name': '넷플릭스', 'module_name': 'site_netflix', 'class_name': 'NF', 'user_order': 'NF', 'enabled': True},
     'FD': {'command': 'dsnp_code', 'display_name': '디즈니 플러스', 'module_name': 'site_disney', 'class_name': 'DSNP', 'user_order': 'DSNP', 'enabled': True},
     'FA': {'command': 'atvp_code', 'display_name': '애플TV', 'module_name': 'site_appletv', 'class_name': 'ATVP', 'user_order': 'ATVP', 'enabled': True},
     'FP': {'command': 'amzn_code', 'display_name': '프라임 비디오', 'module_name': 'site_prime', 'class_name': 'AMZN', 'user_order': 'AMZN', 'enabled': True},
