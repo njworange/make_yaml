@@ -421,10 +421,8 @@ def extract_appletv_episodes(season_html):
             'index': int(match.group('index')),
             'title': decode_ebs_text(match.group('title')),
             'summary': decode_ebs_text(match.group('summary')),
-            'runtime': normalize_appletv_duration(match.group('duration')),
             'thumbs': extract_appletv_src_from_srcset(html.unescape(match.group('srcset') or '')),
             'originally_available_at': '',
-            'code': extract_appletv_code_from_url(episode_url),
             'url': episode_url,
         })
     return episodes
@@ -458,10 +456,8 @@ def fetch_appletv_api_episodes(show_id, page_size=10, max_pages=100):
                 'index': int(item.get('episodeNumber') or item.get('episodeIndex') or len(episodes) + 1),
                 'title': decode_ebs_text(item.get('title') or ''),
                 'summary': decode_ebs_text(item.get('description') or ''),
-                'runtime': int((item.get('duration') or 0) / 60) if item.get('duration') else 0,
                 'thumbs': normalize_appletv_image_url(images.get('contentImage') or images.get('posterArt') or ''),
                 'originally_available_at': normalize_appletv_date(item.get('releaseDate')),
-                'code': episode_code,
                 'url': episode_url,
                 'season_number': int(item['seasonNumber']) if item.get('seasonNumber') is not None else 1,
             })
@@ -509,8 +505,6 @@ def enrich_appletv_episode(episode):
             image_url = decode_ebs_text(episode_schema.get('image') or '')
             if image_url:
                 episode['thumbs'] = image_url
-        if not episode.get('code'):
-            episode['code'] = extract_appletv_code_from_url(episode_schema.get('url') or episode_url)
     except Exception as e:
         logger.error(f"Exception:{str(e)}")
         logger.error(traceback.format_exc())
@@ -577,14 +571,12 @@ def build_appletv_show_data(show_id):
     if not seasons:
         if title or summary:
             return {
-                'code': show_id,
                 'title': title or show_id,
                 'summary': summary,
                 'seasons': [],
             }
         return None
     show_data = {
-        'code': show_id,
         'title': title,
         'summary': summary,
         'seasons': seasons,
