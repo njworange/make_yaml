@@ -71,3 +71,41 @@ EBSKIDS 를 제외하고 7개의 OTT 를 원하는 순서대로 넣는다.
 
 EBSKIDS https://anikids.ebs.co.kr/anikids/program/show/10024440 에서 ***10024440***
 
+
+######**<현재 구현 상태>**
+
+
+현재 코드 기준으로 episode parser 가능 여부는 아래와 같다.
+
+
+- 웨이브: 가능
+- 티빙: 가능
+- 아마존 프라임 비디오: 가능
+- 애플 TV: 가능
+- EBSKIDS: 가능
+- 넷플릭스: 가능
+- 디즈니플러스: public parser 기준으로 show-level 메타데이터까지만 확인, episode-level parser 는 아직 보류
+- 쿠팡플레이: 미해결
+
+
+######**<OTT별 메모>**
+
+
+- 웨이브, 티빙: 기존 all season 처리 유지
+- 아마존 프라임 비디오: public detail page 기반으로 title, summary, 시즌/에피소드 정보를 가져온다.
+- 애플 TV: public page + 공개 메타데이터 기반으로 동작한다. 다중 시즌 수집도 반영되어 있다.
+- EBSKIDS: 공개 program page와 episode detail page JSON-LD 를 사용한다. episode summary 와 날짜 prefix title 이 반영되어 있다.
+- 넷플릭스: public title page 기반 parser 가 추가되어 episode title, summary, 썸네일 추출이 가능하다. 다만 현재 공개 페이지 기준으로 episode 날짜 정보는 확인하지 못했다.
+- 디즈니플러스: public parser 기준으로 entity page 의 title, summary, image, year, cast 같은 show-level 메타데이터는 공개되어 있으나, episode/season payload 는 아직 확보하지 못했다. 기존 legacy provider 경로는 별도로 남아 있다.
+- 쿠팡플레이: 아직 안정적인 public parser 경로를 찾지 못했다.
+
+
+######**<날짜 prefix 정책>**
+
+
+현재 날짜 정보를 안정적으로 얻을 수 있는 OTT 는 episode title 앞에 `YYYY.MM.DD(요일)` 형식으로 붙여 통일했다.
+
+
+- 적용됨: 웨이브, 티빙, 애플 TV, EBSKIDS, 아마존 프라임 비디오(날짜가 공개되는 경우)
+- 미적용: 넷플릭스(현재 공개 페이지에서 episode 날짜를 확인하지 못함), 디즈니플러스, 쿠팡플레이
+
