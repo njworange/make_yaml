@@ -1039,12 +1039,16 @@ def build_appletv_show_data(show_id):
     if not seasons:
         if title or summary:
             return {
+                'code': show_id,
+                'primary': False,
                 'title': title or show_id,
                 'summary': summary,
                 'seasons': [],
             }
         return None
     show_data = {
+        'code': show_id,
+        'primary': False,
         'title': title,
         'summary': summary,
         'seasons': seasons,
@@ -1375,6 +1379,8 @@ def get_show_data(code):
             show_data = normalize_tving_show_data(show_data)
         elif site == 'KW':
             show_data = normalize_wavve_show_data(site_code, show_data)
+        if isinstance(show_data, dict):
+            show_data.setdefault('primary', False)
         if isinstance(show_data, dict):
             logger.debug(f"YAMLUTILS get_data result site={site} type=dict keys={list(show_data.keys())} seasons={len(show_data.get('seasons', []))}")
         elif isinstance(show_data, list):

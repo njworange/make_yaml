@@ -4,7 +4,7 @@ def apply_tmdb_data(tmdb_code, show_data):
     tmdbftv = ModuleFtv('metadata')
     data = tmdbftv.info(tmdb_code)
     data = tmdbftv.process_trans('show', data)
-    show_data['primary'] = True
+    show_data['primary'] = False
     show_data['title'] = data['title']
     show_data['title_sort'] = data['title']
     for art in data['art']:
