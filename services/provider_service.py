@@ -5,6 +5,7 @@ import json
 import re
 import traceback
 from datetime import datetime
+from html.parser import HTMLParser
 
 import requests
 
@@ -601,6 +602,17 @@ def split_netflix_people(value):
     return [item.strip() for item in re.split(r',| 및 ', text) if item.strip()]
 
 
+def extract_netflix_declared_episode_count(lines):
+    for line in lines:
+        match = re.search(r'에피소드\s*(\d+)개', line)
+        if match:
+            return int(match.group(1))
+        match = re.search(r'(\d+)\s+Episodes', line, flags=re.I)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
 def extract_netflix_extras(lines):
     extras = {}
     actors = []
@@ -620,6 +632,70 @@ def extract_netflix_extras(lines):
     if genres:
         extras['genres'] = genres
     return extras
+
+
+class NetflixEpisodeHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.depth = 0
+        self.episodes_depth = None
+        self.episodes_tag = None
+        self.current_item = None
+        self.current_li_depth = None
+        self.items = []
+
+    def handle_starttag(self, tag, attrs):
+        attr_map = dict(attrs)
+        if self.episodes_depth is None and attr_map.get('id') == 'episodes':
+            self.episodes_depth = self.depth
+            self.episodes_tag = tag
+        if self.episodes_depth is not None and self.current_item is None and tag == 'li':
+            self.current_item = {'thumbs': '', 'texts': []}
+            self.current_li_depth = self.depth
+        if self.current_item is not None and tag == 'img' and not self.current_item['thumbs']:
+            self.current_item['thumbs'] = attr_map.get('src') or attr_map.get('data-src') or ''
+        self.depth += 1
+
+    def handle_endtag(self, tag):
+        self.depth -= 1
+        if self.current_item is not None and tag == 'li' and self.depth == self.current_li_depth:
+            self.items.append(self.current_item)
+            self.current_item = None
+            self.current_li_depth = None
+        if self.episodes_depth is not None and tag == self.episodes_tag and self.depth == self.episodes_depth:
+            self.episodes_depth = None
+            self.episodes_tag = None
+
+    def handle_data(self, data):
+        if self.current_item is None:
+            return
+        text = re.sub(r'\s+', ' ', data.replace('\xa0', ' ')).strip()
+        if text:
+            self.current_item['texts'].append(text)
+
+
+def extract_netflix_episode_cards(page_html):
+    parser = NetflixEpisodeHTMLParser()
+    parser.feed(page_html)
+    runtime_pattern = re.compile(r'^(?:\d+분|\d+시간(?:\s*\d+분)?)$')
+    title_pattern = re.compile(r'^\d+\.\s+.+$')
+    episodes = []
+    for item in parser.items:
+        texts = []
+        for text in item.get('texts', []):
+            if not texts or texts[-1] != text:
+                texts.append(text)
+        if len(texts) < 3 or not runtime_pattern.match(texts[0]) or not title_pattern.match(texts[1]):
+            continue
+        episode_index_match = re.match(r'^(?P<index>\d+)\.', texts[1])
+        episode_index = int(episode_index_match.group('index')) if episode_index_match else len(episodes) + 1
+        episodes.append({
+            'index': episode_index,
+            'title': normalize_netflix_episode_title(texts[1]),
+            'summary': decode_ebs_text(' '.join(texts[2:])),
+            'thumbs': item.get('thumbs', ''),
+        })
+    return episodes
 
 
 def extract_netflix_episode_blocks(lines):
@@ -692,7 +768,15 @@ def build_netflix_show_data(title_code):
     summary = extract_netflix_meta_content(page_html, 'og:description') or extract_netflix_meta_content(page_html, 'description')
     poster = extract_netflix_meta_content(page_html, 'og:image')
     lines = extract_netflix_text(page_html)
-    episodes = extract_netflix_episode_blocks(lines)
+    declared_episode_count = extract_netflix_declared_episode_count(lines)
+    episodes = extract_netflix_episode_cards(page_html)
+    if not has_reliable_netflix_episodes(episodes):
+        episodes = extract_netflix_episode_blocks(lines)
+    if declared_episode_count and len(episodes) < declared_episode_count:
+        logger.debug(
+            f"Netflix public parse incomplete code={title_code} declared={declared_episode_count} parsed={len(episodes)}"
+        )
+        return None
     if not title or not summary or not has_reliable_netflix_episodes(episodes):
         return None
     show_data = {
@@ -711,7 +795,7 @@ def build_netflix_show_data(title_code):
     if poster:
         show_data['posters'] = [poster]
         for episode in show_data['seasons'][0]['episodes']:
-            episode['thumbs'] = poster
+            episode.setdefault('thumbs', poster)
     return show_data
 
 

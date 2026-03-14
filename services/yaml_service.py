@@ -14,6 +14,9 @@ class LiteralString(str):
     pass
 
 
+TOP_LEVEL_KEY_ORDER = ['code', 'primary']
+
+
 def normalize_text(value):
     value = value.replace('\r\n', '\n').replace('\r', '\n').replace('\t', ' ')
     lines = [line.rstrip() for line in value.split('\n')]
@@ -38,6 +41,19 @@ def sanitize_yaml_value(value, key=None):
     return value
 
 
+def reorder_top_level_keys(show_data):
+    if not isinstance(show_data, dict):
+        return show_data
+    reordered = {}
+    for key in TOP_LEVEL_KEY_ORDER:
+        if key in show_data:
+            reordered[key] = show_data[key]
+    for key, value in show_data.items():
+        if key not in reordered:
+            reordered[key] = value
+    return reordered
+
+
 def represent_clean_string(dumper, value):
     style = '|' if '\n' in value else None
     return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
@@ -53,5 +69,5 @@ def write_yaml(show_data, target_path=None):
     with open(os.path.join(target_path, filename + '.yaml'), 'w', encoding='utf-8') as outfile:
         if not P.ModelSetting.get_bool('is_primary') and P.ModelSetting.get_bool('delete_title'):
             del show_data['title']
-        clean_show_data = sanitize_yaml_value(show_data)
+        clean_show_data = sanitize_yaml_value(reorder_top_level_keys(show_data))
         yaml.dump(clean_show_data, outfile, Dumper=CleanDumper, sort_keys=False, allow_unicode=True, default_flow_style=False, width=4096)
