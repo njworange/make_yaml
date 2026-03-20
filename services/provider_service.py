@@ -252,6 +252,12 @@ def extract_ebs_episodes(page_html):
 
 
 def extract_ebs_episode_summary(page_html):
+    body_match = re.search(r'<dd[^>]+class=["\']vod_disk["\'][^>]*>(?P<summary>.*?)</dd>', page_html, flags=re.S | re.I)
+    if body_match:
+        summary = decode_ebs_text(re.sub(r'<[^>]+>', ' ', body_match.group('summary')))
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        if summary:
+            return summary
     script_pattern = re.compile(
         r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>\s*(?P<json>.*?)\s*</script>',
         flags=re.S | re.I,
