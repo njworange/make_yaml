@@ -313,6 +313,7 @@ def fetch_ebs_ajax_episodes(course_id, step_id='', orderby='OLD', max_pages=20):
             if episode['code'] in seen_codes:
                 continue
             seen_codes.add(episode['code'])
+            episode['index'] = len(episodes) + 1
             episodes.append(episode)
             added_count += 1
         if added_count == 0:
