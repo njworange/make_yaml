@@ -1,5 +1,6 @@
 import os
 import re
+import copy
 
 import yaml
 
@@ -54,6 +55,25 @@ def reorder_top_level_keys(show_data):
     return reordered
 
 
+def remove_episode_code_fields(show_data):
+    if not isinstance(show_data, dict):
+        return show_data
+    cleaned = copy.deepcopy(show_data)
+    seasons = cleaned.get('seasons')
+    if not isinstance(seasons, list):
+        return cleaned
+    for season in seasons:
+        if not isinstance(season, dict):
+            continue
+        episodes = season.get('episodes')
+        if not isinstance(episodes, list):
+            continue
+        for episode in episodes:
+            if isinstance(episode, dict):
+                episode.pop('code', None)
+    return cleaned
+
+
 def represent_clean_string(dumper, value):
     style = '|' if '\n' in value else None
     return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
@@ -69,5 +89,5 @@ def write_yaml(show_data, target_path=None):
     with open(os.path.join(target_path, filename + '.yaml'), 'w', encoding='utf-8') as outfile:
         if not P.ModelSetting.get_bool('is_primary') and P.ModelSetting.get_bool('delete_title'):
             del show_data['title']
-        clean_show_data = sanitize_yaml_value(reorder_top_level_keys(show_data))
+        clean_show_data = sanitize_yaml_value(reorder_top_level_keys(remove_episode_code_fields(show_data)))
         yaml.dump(clean_show_data, outfile, Dumper=CleanDumper, sort_keys=False, allow_unicode=True, default_flow_style=False, width=4096)
