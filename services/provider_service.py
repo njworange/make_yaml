@@ -125,6 +125,12 @@ def fetch_ebs_html(url):
     return decode_response_html(response)
 
 
+def post_ebs_html(url, data=None):
+    response = requests.post(url, headers=EBS_HEADERS, data=data or {}, timeout=15)
+    response.raise_for_status()
+    return decode_response_html(response)
+
+
 def fetch_appletv_html(url):
     response = requests.get(url, headers=APPLE_TV_HEADERS, timeout=15)
     response.raise_for_status()
@@ -251,6 +257,71 @@ def extract_ebs_episodes(page_html):
     return episodes
 
 
+def extract_ebs_ajax_episodes(page_html):
+    episodes = []
+    pattern = re.compile(
+        r'<div\s+class="item">.*?'
+        r'<a\s+href="(?P<href>/vodCommon/show\?[^\"]*lectId=(?P<lect_id>[^&\"]+)[^\"]*)"[^>]*>.*?'
+        r'<img[^>]+src="(?P<thumb>[^\"]*)".*?</a>.*?'
+        r'<dt\s+class="vod_title">(?P<title>.*?)</dt>.*?'
+        r'<dd\s+class="vod_disk">(?P<summary>.*?)</dd>.*?'
+        r'<li\s+class="vod_date">\s*<span>(?P<date>[^<]+)</span>',
+        flags=re.S,
+    )
+    seen_lect_ids = set()
+    for match in pattern.finditer(page_html):
+        lect_id = match.group('lect_id').strip()
+        if not lect_id or lect_id in seen_lect_ids:
+            continue
+        seen_lect_ids.add(lect_id)
+        title = normalize_ebs_episode_title(match.group('title'))
+        date_text = normalize_ebs_date(match.group('date'))
+        episode_number_match = re.match(r'^(\d+)', decode_ebs_text(match.group('title')))
+        index = int(episode_number_match.group(1)) if episode_number_match else len(episodes) + 1
+        summary = decode_ebs_text(re.sub(r'<[^>]+>', ' ', match.group('summary')))
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        episodes.append({
+            'index': index,
+            'title': title,
+            'summary': summary,
+            'thumbs': match.group('thumb').strip(),
+            'originally_available_at': date_text,
+            'code': lect_id,
+            '_detail_path': html.unescape(match.group('href').strip()),
+        })
+    return episodes
+
+
+def fetch_ebs_ajax_episodes(course_id, step_id='', orderby='OLD', max_pages=20):
+    episodes = []
+    seen_codes = set()
+    for page_number in range(1, max_pages + 1):
+        ajax_html = post_ebs_html(
+            'https://anikids.ebs.co.kr/anikids/getVodListAjax',
+            data={
+                'pageNumber': page_number,
+                'courseId': course_id,
+                'stepId': step_id,
+                'orderby': orderby,
+            },
+        )
+        page_episodes = extract_ebs_ajax_episodes(ajax_html)
+        if not page_episodes:
+            break
+        added_count = 0
+        for episode in page_episodes:
+            if episode['code'] in seen_codes:
+                continue
+            seen_codes.add(episode['code'])
+            episodes.append(episode)
+            added_count += 1
+        if added_count == 0:
+            break
+        if "paginationAK('" not in ajax_html:
+            break
+    return episodes
+
+
 def extract_ebs_episode_summary(page_html):
     body_match = re.search(r'<dd[^>]+class=["\']vod_disk["\'][^>]*>(?P<summary>.*?)</dd>', page_html, flags=re.S | re.I)
     if body_match:
@@ -290,7 +361,7 @@ def extract_ebs_episode_summary(page_html):
 
 def enrich_ebs_episode(episode):
     detail_path = episode.get('_detail_path') or ''
-    if detail_path:
+    if detail_path and not episode.get('summary'):
         try:
             detail_html = fetch_ebs_html(f'https://anikids.ebs.co.kr{detail_path}')
             summary = extract_ebs_episode_summary(detail_html)
@@ -307,6 +378,25 @@ def enrich_ebs_episode(episode):
         episode['title'] = original_title
     episode.pop('_detail_path', None)
     return episode
+
+
+def sanitize_ebs_episode_summaries(episodes):
+    if not episodes:
+        return episodes
+    seen_summaries = {}
+    for episode in episodes:
+        summary = (episode.get('summary') or '').strip()
+        if not summary:
+            continue
+        seen_summaries.setdefault(summary, []).append(episode)
+    for summary, grouped_episodes in seen_summaries.items():
+        if len(grouped_episodes) < 2:
+            continue
+        first_episode = grouped_episodes[0]
+        for episode in grouped_episodes[1:]:
+            if episode.get('code') != first_episode.get('code'):
+                episode['summary'] = ''
+    return episodes
 
 
 def build_ebs_show_data(program_id):
@@ -333,10 +423,14 @@ def build_ebs_show_data(program_id):
         season_html = fetch_ebs_html(season_url)
         vod_option = extract_ebs_json_object(season_html, 'vodOption')
         season_title = decode_ebs_text(vod_option.get('stepNm') or season_entry['label'])
-        episodes = extract_ebs_episodes(season_html)
+        step_id = season_entry['step_id'] or str(vod_option.get('stepId') or '').strip()
+        episodes = fetch_ebs_ajax_episodes(course_id, step_id) if step_id else []
+        if not episodes:
+            episodes = extract_ebs_episodes(season_html)
         if not episodes:
             continue
         episodes = [enrich_ebs_episode(episode) for episode in episodes]
+        episodes = sanitize_ebs_episode_summaries(episodes)
         for episode in episodes:
             air_date = episode.get('originally_available_at') or ''
             if air_date and (not earliest_date or air_date < earliest_date):
