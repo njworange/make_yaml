@@ -97,7 +97,7 @@ class ExportBoundaryTests(unittest.TestCase):
         self.assertEqual((season['index'], episode['index']), (0, 0))
         self.assertEqual(result['extras'], show_fixture()['extras'])
         self.assertEqual(season['summary'], '시즌 설명')
-        self.assertEqual(episode['title'], '2025.05.10(토) 회차 제목')
+        self.assertEqual(episode['title'], '2025.5.10(토) 회차 제목')
 
     def test_deep_copy_and_idempotence(self):
         original = show_fixture()
@@ -237,7 +237,7 @@ class ProviderBoundaryTests(unittest.TestCase):
         for value in (wavve['seasons'][0]['episodes'][0], ebs, prime):
             self.assertEqual(value['title'], 'English title')
             exported = normalizer.normalize_export_data({'seasons': [{'episodes': [value]}]})
-            self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2025.05.10(토) English title')
+            self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2025.5.10(토) English title')
 
     def test_apple_title_without_detail_or_on_detail_failure(self):
         env = provider_namespace()
@@ -248,7 +248,7 @@ class ProviderBoundaryTests(unittest.TestCase):
             })
             self.assertEqual(result['title'], 'Title')
             exported = normalizer.normalize_export_data({'seasons': [{'episodes': [result]}]})
-            self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2025.05.10(토) Title')
+            self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2025.5.10(토) Title')
 
     def test_tving_never_uses_thumbnail_date(self):
         env = provider_namespace()
@@ -265,7 +265,7 @@ class ProviderBoundaryTests(unittest.TestCase):
 
     def test_tving_preserves_real_date_and_no_date_key(self):
         env = provider_namespace()
-        for date_fields, expected in [({}, '실제 제목'), ({'originally_available_at': '2020-01-01'}, '2020.01.01(수) 실제 제목')]:
+        for date_fields, expected in [({}, '실제 제목'), ({'originally_available_at': '2020-01-01'}, '2020.1.1(수) 실제 제목')]:
             original = {'seasons': [{'episodes': [{'title': '1. 실제 제목', 'thumbs': 'https://x/20260912/a', **date_fields}]}]}
             result = env['normalize_tving_show_data'](original)['seasons'][0]['episodes'][0]
             self.assertEqual(result['title'], '실제 제목')  # decoration now belongs to export
@@ -334,15 +334,68 @@ class ProviderBoundaryTests(unittest.TestCase):
 
 
 class EpisodeTitleAndErrorTests(unittest.TestCase):
+    def test_unpadded_display_keeps_iso_date_field(self):
+        for day, display in [
+            ('2026-02-10', '2026.2.10(화)'),  # month only
+            ('2026-10-02', '2026.10.2(금)'),  # day only
+            ('2026-02-03', '2026.2.3(화)'),   # both single-digit
+            ('2026-10-12', '2026.10.12(월)'), # both double-digit
+            ('2024-02-29', '2024.2.29(목)'),  # leap day
+            ('0001-01-01', '0001.1.1(월)'),   # four-digit year, independent of strftime padding
+        ]:
+            for title in ('제목', '', None):
+                with self.subTest(day=day, title=title):
+                    original = {'seasons': [{'episodes': [{'title': title, 'originally_available_at': day}]}]}
+                    before = copy.deepcopy(original)
+                    result = normalizer.normalize_export_data(original)
+                    episode = result['seasons'][0]['episodes'][0]
+                    self.assertEqual(episode['title'], display + (' 제목' if title else ''))
+                    self.assertEqual(episode['originally_available_at'], day)
+                    self.assertEqual(normalizer.normalize_export_data(result), result)
+                    self.assertEqual(original, before)
+                    loaded = yaml.safe_load(yaml.dump(writer.sanitize_yaml_value(result), Dumper=writer.CleanDumper))
+                    self.assertEqual(loaded['seasons'][0]['episodes'][0]['originally_available_at'], day)
+
+    def test_padded_unpadded_prefixes_in_shared_provider_paths(self):
+        env = provider_namespace()
+        env['fetch_wavve_episode_metadata'] = lambda *args: {'by_index': {}, 'by_title': {}}
+        for prefix in [
+            '2026.02.03(화)', '2026.2.03(화)', '2026.02.3(화)', '2026.2.3(화)',
+            '2026-02-03(화)', '2026-2-03(화)', '2026-02-3(화)', '2026-2-3(화)',
+            '2025.05.10(토) 2026.2.3(화) 2026-02-03(화)',
+        ]:
+            with self.subTest(prefix=prefix):
+                title = prefix + ' English title'
+                self.assertEqual(titles.strip_broadcast_prefix(title), 'English title')
+                for day, expected in [(None, 'English title'), ('2026-02-10', '2026.2.10(화) English title')]:
+                    self.assertEqual(titles.format_episode_title(title, day), expected)
+                self.assertEqual(env['normalize_ebs_episode_title']('1. ' + title), 'English title')
+                self.assertEqual(env['normalize_ebs_episode_title'](title), 'English title')
+                self.assertEqual(env['normalize_prime_episode_title']('시즌 1 에피소드 1 - ' + title), 'English title')
+                self.assertEqual(env['enrich_appletv_episode']({'title': title})['title'], 'English title')
+                self.assertEqual(env['normalize_tving_episode_title'](title), 'English title')
+                self.assertEqual(env['normalize_tving_episode_title']('1. ' + title), 'English title')
+                data = {'seasons': [{'episodes': [{'index': 1, 'title': title}]}]}
+                wavve = env['normalize_wavve_show_data']('id', data)
+                self.assertEqual(wavve['seasons'][0]['episodes'][0]['title'], 'English title')
+
+    def test_prefix_matching_stays_narrow(self):
+        for title in ['2026.2.10 특집', '2026.02.10 특집', '2026-2-10 특집',
+                      '제목 2026.2.10(화)', '2026.2-10(화) 제목', '2026.222.10(화) 제목',
+                      '2026.2.10(Tue) Title']:
+            with self.subTest(title=title):
+                self.assertEqual(titles.strip_broadcast_prefix(title), title)
+                self.assertEqual(titles.format_episode_title(title, None), title)
+
     def test_title_date_matrix_and_idempotence(self):
         cases = [
-            ('제목', '2025-05-10', '2025.05.10(토) 제목'),
-            ('', '2025-05-10', '2025.05.10(토)'),
-            (None, '2025.05.10', '2025.05.10(토)'),
+            ('제목', '2025-05-10', '2025.5.10(토) 제목'),
+            ('', '2025-05-10', '2025.5.10(토)'),
+            (None, '2025.05.10', '2025.5.10(토)'),
             ('제목', None, '제목'), ('', None, ''),
             ('2020.01.01(수) Title', None, 'Title'),
-            ('2020-01-01(수) Title', '2025-05-10', '2025.05.10(토) Title'),
-            ('2020.01.01(수) 2021.01.01(금) Title', '2025-05-10', '2025.05.10(토) Title'),
+            ('2020-01-01(수) Title', '2025-05-10', '2025.5.10(토) Title'),
+            ('2020.01.01(수) 2021.01.01(금) Title', '2025-05-10', '2025.5.10(토) Title'),
             ('2025.05.10 특집', None, '2025.05.10 특집'),
             ('1. Original title', None, '1. Original title'),
         ]
@@ -355,7 +408,7 @@ class EpisodeTitleAndErrorTests(unittest.TestCase):
                 self.assertEqual(original, before)
                 self.assertEqual(normalizer.normalize_export_data(result), result)
         result = normalizer.normalize_export_data({'seasons': [{'episodes': [{'originally_available_at': '2025-05-10'}]}]})
-        self.assertEqual(result['seasons'][0]['episodes'][0]['title'], '2025.05.10(토)')
+        self.assertEqual(result['seasons'][0]['episodes'][0]['title'], '2025.5.10(토)')
 
     def test_all_provider_prefixes_share_the_export_rule(self):
         for prefix in ('KW', 'KV', 'FN', 'FD', 'FP', 'FA', 'KE', 'KC'):
@@ -363,14 +416,14 @@ class EpisodeTitleAndErrorTests(unittest.TestCase):
             value['code'] = prefix + 'fixture'
             value['seasons'][0]['episodes'][0]['title'] = 'Title'
             result = normalizer.normalize_export_data(value)
-            self.assertEqual(result['seasons'][0]['episodes'][0]['title'], '2025.05.10(토) Title')
+            self.assertEqual(result['seasons'][0]['episodes'][0]['title'], '2025.5.10(토) Title')
 
     def test_final_title_uses_date_after_enrichment(self):
         value = show_fixture()
         episode = value['seasons'][0]['episodes'][0]
         episode['originally_available_at'] = '2024-02-29'
         result = normalizer.normalize_export_data(value)
-        self.assertEqual(result['seasons'][0]['episodes'][0]['title'], '2024.02.29(목) 회차 제목')
+        self.assertEqual(result['seasons'][0]['episodes'][0]['title'], '2024.2.29(목) 회차 제목')
         episode['originally_available_at'] = ''
         result = normalizer.normalize_export_data(value)
         self.assertEqual(result['seasons'][0]['episodes'][0]['title'], '회차 제목')
@@ -384,6 +437,10 @@ class EpisodeTitleAndErrorTests(unittest.TestCase):
             ('2025.05.10(토) English title', 'English summary', False),
             ('2025.05.10(토)', '', False),
             ('2025-05-10(토) 2024.01.01(월) Title', '', False),
+            ('2026.2.10(화) English title', 'English summary', False),
+            ('2026.2.3(화)', '', False),
+            ('2025.05.10(토) 2026-2-3(화) Title', '', False),
+            ('2026.2.10(화) 한글 제목', '', True),
             ('한글 제목', '', True), (None, '한국어 요약', True), ('', 'English', False),
         ]:
             data = {'seasons': [{'episodes': [{'title': title, 'summary': summary}]}]}
@@ -416,7 +473,7 @@ class EpisodeTitleAndErrorTests(unittest.TestCase):
             if success:
                 self.assertEqual(response['ret'], 'success')
                 exported = yaml.safe_load(opened().write.call_args.args[0])
-                self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2025.05.10(토)')
+                self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2025.5.10(토)')
                 env['logger'].error.assert_not_called()
             else:
                 self.assertEqual(response['ret'], 'fail')
