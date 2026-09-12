@@ -8,6 +8,7 @@ from the actual source AST to avoid loading opaque legacy modules or doing I/O.
 import ast
 import copy
 import html
+import json
 from datetime import date, datetime
 import importlib.util
 from pathlib import Path
@@ -696,6 +697,185 @@ class TvingDateEnrichmentTests(unittest.TestCase):
                 self.assertEqual('originally_available_at' in season['episodes'][0], not fail)
             normalizer.normalize_export_data(result)  # both paths remain valid export input
             client.get_frequency_programid.assert_called_once()
+
+
+class TvingDiagnosticTests(unittest.TestCase):
+    show = staticmethod(TvingDateEnrichmentTests.show)
+    row = staticmethod(TvingDateEnrichmentTests.row)
+
+    def setUp(self):
+        self.logger = Mock()
+        self.log_patch = patch.object(setup.P, 'logger', self.logger)
+        self.log_patch.start()
+        self.addCleanup(self.log_patch.stop)
+
+    def diagnose(self, show=None, pages=None, client=None):
+        self.logger.reset_mock()
+        result = TvingDateEnrichmentTests.run_enrich(
+            self, self.show() if show is None else show, pages, client)
+        self.logger.info.assert_called_once()
+        text = self.logger.info.call_args.args[0]
+        self.assertTrue(text.startswith('TVING_DATE_DIAG '))
+        self.logger.error.assert_not_called()
+        return result, json.loads(text.split(' ', 1)[1])
+
+    def test_applied_summary_is_log_only(self):
+        result, log = self.diagnose()
+        self.assertEqual(log['reason'], 'APPLIED')
+        self.assertEqual(log['applied'], 1)
+        self.assertTrue(log['program_match'])
+        self.assertTrue(log['local_program_match'])
+        self.assertEqual(log['frequency_attempts'], 1)
+        self.assertEqual(log['code_attempts'], 0)
+        self.assertEqual(log['source_date_valid'], 1)
+        self.assertEqual(log['unique_candidates'], 1)
+        self.assertEqual(log['pages'], [{'page': 1, 'rows': 1, 'has_more': 'N'}])
+        expected = self.show()
+        expected['seasons'][0]['episodes'][0]['originally_available_at'] = '2024-02-29'
+        self.assertEqual(result, expected)
+        exported = yaml.safe_dump(normalizer.normalize_export_data(result), allow_unicode=True)
+        for field in ['TVING_DATE_DIAG', 'reason_counts', 'matching_started', 'program_match']:
+            self.assertNotIn(field, exported)
+
+    def test_page_cap_and_scope_diagnosed_together_before_matching(self):
+        show = self.show()
+        del show['seasons'][0]['index']
+        pages = [{'result': [self.row(f'E{i}', i)], 'has_more': 'Y'} for i in range(1, 11)]
+        result, log = self.diagnose(show, pages)
+        self.assertEqual(result, show)
+        self.assertEqual(log['reason'], 'PAGE_CAP_REACHED_DISCARD')
+        self.assertEqual(log['page'], 10)
+        self.assertEqual(len(log['pages']), 10)
+        self.assertEqual(log['source_date_valid'], 10)
+        self.assertEqual(log['scope_reason'], 'NO_SEASON1_SCOPE')
+        self.assertEqual(log['seasons'][0]['index_state'], 'MISSING')
+        self.assertFalse(log['matching_started'])
+        self.assertEqual(log['frequency_attempts'], 0)
+        self.assertEqual(log['applied'], 0)
+
+    def test_season_reasons_are_not_code_match_prohibitions(self):
+        show = self.show(season=2)
+        _, log = self.diagnose(show)
+        self.assertEqual(log['reason_counts']['NO_SEASON1_SCOPE'], 1)
+        show['seasons'].append({'index': 3, 'episodes': [{'index': 1}]})
+        _, log = self.diagnose(show)
+        self.assertEqual(log['reason_counts']['MULTI_SEASON_SKIPPED'], 2)
+        self.assertEqual(log['season_count'], 2)
+        show['seasons'][0]['episodes'][0]['code'] = 'E001'
+        _, log = self.diagnose(show)
+        self.assertEqual(log['reason'], 'APPLIED')
+        self.assertEqual(log['code_attempts'], 1)
+        self.assertEqual(log['reason_counts']['MULTI_SEASON_SKIPPED'], 1)
+
+    def test_matching_and_date_reasons(self):
+        for show, rows, expected in [
+            (self.show([{'index': 1, 'code': 'E404'}]), [self.row()], 'CODE_MISMATCH'),
+            (self.show([{'index': 9}]), [self.row()], 'NO_CANDIDATE'),
+            (self.show(), [self.row(day='bad')], 'DATE_INVALID'),
+            (self.show(), [self.row(day=None)], 'DATE_MISSING'),
+            (self.show(), [self.row(), self.row('E002', 1)], 'AMBIGUOUS_FREQUENCY'),
+            (self.show([{'code': 'E001'}]), [self.row(), self.row('E001', 2)], 'AMBIGUOUS_CODE'),
+            (self.show(), [self.row(), self.row('E001', 2)], 'AMBIGUOUS_SOURCE_CODE'),
+            (self.show([{'index': 1}, {'index': 1}]), [self.row()], 'DUPLICATE_TARGET'),
+            (self.show([{'index': 1}, {'code': 'E001', 'index': 2}]), [self.row()], 'SOURCE_REUSED'),
+        ]:
+            with self.subTest(expected=expected):
+                result, log = self.diagnose(show, [{'result': rows, 'has_more': 'N'}])
+                self.assertEqual(result, show)
+                self.assertEqual(log['reason'], 'NO_UPDATES')
+                self.assertGreater(log['reason_counts'][expected], 0)
+                if expected in ('DATE_INVALID', 'DATE_MISSING'):
+                    self.assertEqual(log['reason_counts']['MATCHED_DATE_UNAVAILABLE'], 1)
+
+    def test_fetch_and_local_exit_reasons(self):
+        for payload, expected in [
+            (None, 'PAGE_RESPONSE_INVALID'), ({'result': {} , 'has_more': 'N'}, 'PAGE_RESULT_INVALID'),
+            ({'result': [{}], 'has_more': 'N'}, 'PAGE_EPISODE_INVALID'),
+            ({'result': [], 'has_more': 'Y'}, 'EMPTY_PAGE_DISCARD'),
+            ({'result': [], 'has_more': 'N'}, 'NO_SOURCE_ROWS'),
+        ]:
+            _, log = self.diagnose(pages=[payload])
+            self.assertEqual(log['reason'], expected)
+        page = {'result': [self.row()], 'has_more': 'Y'}
+        _, log = self.diagnose(pages=[page, page])
+        self.assertEqual(log['reason'], 'REPEATED_PAGE_DISCARD')
+        self.assertEqual(log['page'], 2)
+        for program, expected in [(None, 'PROGRAM_RESPONSE_INVALID'), ({'code': 'P404'}, 'NO_PROGRAM_MATCH')]:
+            _, log = self.diagnose(client=SimpleNamespace(get_program_programid=Mock(return_value=program)))
+            self.assertEqual(log['reason'], expected)
+        show = self.show()
+        show['code'] = 'P404'
+        _, log = self.diagnose(show)
+        self.assertEqual(log['reason'], 'LOCAL_PROGRAM_MISMATCH')
+        self.assertIsNone(log['program_match'])
+        show = self.show([{'originally_available_at': '2024-02-29'}])
+        _, log = self.diagnose(show)
+        self.assertEqual(log['reason'], 'NO_MISSING_DATES')
+        _, log = self.diagnose({'seasons': {}})
+        self.assertEqual(log['reason'], 'INVALID_LOCAL_SHAPE')
+
+    def test_import_and_api_exceptions_log_stage_not_exception_text(self):
+        secret = 'SENSITIVE_EXCEPTION_SENTINEL'
+        with patch.object(tving_dates.importlib, 'import_module', side_effect=ImportError(secret)):
+            _, log = self.diagnose()
+        self.assertEqual(log['reason'], 'SUPPORT_SITE_UNAVAILABLE')
+        for client, expected, stage in [
+            (SimpleNamespace(), 'PROGRAM_API_ERROR', 'PROGRAM_API'),
+            (SimpleNamespace(get_program_programid=Mock(side_effect=RuntimeError(secret))), 'PROGRAM_API_ERROR', 'PROGRAM_API'),
+            (SimpleNamespace(get_program_programid=Mock(return_value={'code': 'P001'}),
+                             get_frequency_programid=Mock(side_effect=RuntimeError(secret))), 'PAGE_API_ERROR', 'PAGE_API'),
+        ]:
+            _, log = self.diagnose(client=client)
+            self.assertEqual(log['reason'], expected)
+            self.assertEqual(log['stage'], stage)
+            self.assertNotIn(secret, json.dumps(log))
+        self.assertEqual(log['pages'], [{'page': 1, 'rows': None, 'has_more': 'UNAVAILABLE'}])
+
+    def test_untrusted_values_never_appear_in_logs_and_seasons_are_bounded(self):
+        secret = 'SECRET_SENTINEL\nFAKE_LOG token=cookie'
+        show = self.show([{'index': 1, 'code': secret, 'title': secret, 'summary': secret}])
+        show['seasons'][0]['index'] = secret
+        row = self.row(code=secret, day=secret)
+        _, log = self.diagnose(show, [{'result': [row], 'has_more': 'N', 'headers': secret}])
+        self.assertNotIn('SECRET_SENTINEL', json.dumps(log))
+        self.assertEqual(log['seasons'][0]['index_state'], 'UNREPRESENTED')
+        _, log = self.diagnose(pages=[{'result': [], 'has_more': secret}])
+        self.assertEqual(log['pages'][0]['has_more'], 'INVALID')
+        self.assertNotIn('SECRET_SENTINEL', json.dumps(log))
+        show = self.show()
+        show['seasons'] *= 25
+        _, log = self.diagnose(show)
+        self.assertEqual(log['season_count'], 25)
+        self.assertEqual(len(log['seasons']), 20)
+        self.assertTrue(log['seasons_truncated'])
+
+    def test_logging_and_observer_failures_do_not_change_results(self):
+        self.logger.info.side_effect = RuntimeError('logger unavailable')
+        result = TvingDateEnrichmentTests.run_enrich(self, self.show())
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+        with patch.object(tving_dates._Diagnostics, 'local', side_effect=RuntimeError('observer unavailable')):
+            result = TvingDateEnrichmentTests.run_enrich(self, self.show())
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+        with patch.object(tving_dates, '_Diagnostics', side_effect=RuntimeError('construction unavailable')):
+            result = TvingDateEnrichmentTests.run_enrich(self, self.show())
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+
+    def test_invalid_program_missing_class_and_processing_error_codes(self):
+        show = self.show()
+        self.assertIs(tving_dates.enrich_tving_dates(None, show), show)
+        self.assertEqual(json.loads(self.logger.info.call_args.args[0].split(' ', 1)[1])['reason'], 'INVALID_PROGRAM_ID')
+        support = ModuleType('support_site')
+        with patch.dict(sys.modules, {'support_site': support}):
+            self.assertIs(tving_dates.enrich_tving_dates('P001', show), show)
+        self.assertEqual(json.loads(self.logger.info.call_args.args[0].split(' ', 1)[1])['reason'], 'SUPPORT_SITE_UNAVAILABLE')
+        support.SupportTving = SimpleNamespace(
+            get_program_programid=lambda pid: {'code': pid},
+            get_frequency_programid=lambda pid, page: {'result': [self.row()], 'has_more': 'N'})
+        with patch.dict(sys.modules, {'support_site': support}), \
+                patch.object(tving_dates.copy, 'deepcopy', side_effect=RuntimeError('synthetic failure')):
+            self.assertIs(tving_dates.enrich_tving_dates('P001', show), show)
+        log = json.loads(self.logger.info.call_args.args[0].split(' ', 1)[1])
+        self.assertEqual((log['reason'], log['stage'], log['applied']), ('ENRICHMENT_ERROR', 'COPY_APPLY', 0))
 
 
 if __name__ == '__main__':

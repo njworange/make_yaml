@@ -142,6 +142,44 @@ Wavve/Tving/Prime/AppleTV/EBS의 중간 provider 데이터에서는 날짜 장�
 외부 메서드의 timeout·토큰 갱신·호출 제한은 `support_site` 구현에 의존한다. 페이지 상한은 개별 요청의
 실행 시간 제한이 아니므로 live FlaskFarm에서 응답 시간과 실제 매칭률은 별도 확인이 필요하다.
 
+**진단 로그 (1.0.33부터)**
+
+새 버전이 실제 로드된 환경에서 티빙 테스트를 한 번 실행한 뒤, make_yaml의 **로그** 메뉴에서
+`TVING_DATE_DIAG`를 찾는다. adapter 호출이 반환될 때 INFO 수준 JSON 한 줄을 남긴다.
+INFO 로그가 필터링되거나 adapter 호출 전에 실패한 경우에는 표시되지 않을 수 있다.
+로그는 YAML/테스트 결과 JSON에 추가되지 않으며, 날짜 보강 판단·페이지 상한·매칭 규칙도 바꾸지 않는다.
+
+- `reason`: 호출의 최종 결과. `APPLIED`이면 `applied`가 실제 추가한 날짜 개수다.
+  `NO_UPDATES`일 때 상세한 건너뛴 이유는 `reason_counts`에 있다.
+- `PAGE_CAP_REACHED_DISCARD`: 페이지 10에서도 종료되지 않아 전량 폐기.
+  `pages`에는 각 페이지의 번호·행수·검증된 `has_more`만 기록한다.
+  빈 중간/반복 페이지는 각각 `EMPTY_PAGE_DISCARD` / `REPEATED_PAGE_DISCARD`다.
+- `frequency_scope` / `scope_reason`: API 조회 전 로컬 시즌 구조에서 계산한 회차번호 매칭 가능 여부.
+  `NO_SEASON1_SCOPE` / `MULTI_SEASON_SKIPPED`는 **코드 없는 회차의 fallback 제약**이며 코드 매칭까지 금지하지 않는다.
+  페이지 상한에 걸려 매칭을 시작하지 못해도 시즌 제약을 함께 확인할 수 있다.
+- `local_program_match`와 `program_match`: 로컬/응답 프로그램 코드 일치 여부. 응답 확인 전에는 `program_match=null`.
+  `NO_PROGRAM_MATCH`는 응답 코드 검증 실패이지 로그인 실패를 확정하는 메시지가 아니다.
+- `season_count`, `seasons`: 보강 전 시즌 수와 위치/숫자 index. 최대 20개만 표시하고 잘리면 `seasons_truncated=true`.
+  결측은 `MISSING`, 안전하게 숫자로 표시할 수 없는 값은 `UNREPRESENTED`로 표기하며 원문은 출력하지 않는다.
+- `matching_started`, `code_attempts`, `frequency_attempts`, `unique_candidates`: 실제 매칭 단계 진입과 시도/유일 후보 수.
+  기존 날짜가 있는 회차도 중복 소유권 검사를 위해 포함한다. 매칭 전에 실패하면 시도 수 0은 정상이다.
+  `CODE_MISMATCH`, `NO_CANDIDATE`, `AMBIGUOUS_*`, `DUPLICATE_TARGET`, `SOURCE_REUSED`는 상세 매칭 제약이다.
+- `source_date_valid/missing/invalid`: 읽은 raw 회차 날짜의 파싱 결과 수(후에 폐기된 페이지도 포함).
+  `DATE_INVALID` / `DATE_MISSING`은 source 날짜 상태, `MATCHED_DATE_UNAVAILABLE`은 매칭 후보의 날짜가 없다는 뜻이다.
+  이유별 집계는 서로 배타적이지 않으며, 다른 회차의 문제일 수도 있으므로 `applied`와 함께 해석한다.
+- `SUPPORT_SITE_UNAVAILABLE`: import/클래스 접근 실패. `PROGRAM_API_ERROR` / `PAGE_API_ERROR`는 해당 호출 단계의 예외
+  (메서드 부재 포함)이며 인증·네트워크 중 무엇이 원인인지는 이 코드만으로 확정하지 않는다.
+  `stage`와 `page`는 마지막 도달 위치다. 응답을 못 받은 페이지는 `rows=null, has_more=UNAVAILABLE`로 남는다.
+- `INVALID_LOCAL_SHAPE`, `INVALID_PROGRAM_ID`, `LOCAL_PROGRAM_MISMATCH`, `NO_MISSING_DATES`, `NO_SOURCE_ROWS`는
+  입력/수집 상태에 따른 조기 종료다. `NO_MISSING_DATES`에는 수정하지 않는 잘못된 기존 비어 있지 않은 날짜도 포함된다.
+  잘못된 프로그램/페이지 응답은 `PROGRAM_RESPONSE_INVALID` / `PAGE_RESPONSE_INVALID` /
+  `PAGE_RESULT_INVALID` / `PAGE_EPISODE_INVALID`, 그 밖의 처리 예외는 `ENRICHMENT_ERROR`로 구분한다.
+
+로그에 작품/회차 코드, 제목, URL, 실제 날짜 값, 토큰·쿠키·헤더, raw 응답 또는 예외 텍스트를 넣지 않는다.
+같은 시각의 다른 요청과 혼동하지 않도록 문제 작품을 한 번씩 재현하고 해당 시각의 한 줄을 확인한다.
+logger/진단 처리 실패도 기존 결과를 바꾸지 않는다. 외부 메서드가 반환하지 않는 경우에는 완료 로그도 없으며,
+다른 플러그인의 자체 로깅까지 이 adapter가 통제하지는 않는다.
+
 ###### **<YAML 출력 정규화>**
 
 TMDB 보강이 끝난 뒤, 파일 저장 직전에 입력 데이터의 복사본을 정규화한다.
