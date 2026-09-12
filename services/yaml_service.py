@@ -5,6 +5,7 @@ import copy
 import yaml
 
 from ..setup import P
+from .export_normalizer import TOP_LEVEL_KEY_ORDER, normalize_export_data, reorder_keys
 
 
 class CleanDumper(yaml.SafeDumper):
@@ -13,9 +14,6 @@ class CleanDumper(yaml.SafeDumper):
 
 class LiteralString(str):
     pass
-
-
-TOP_LEVEL_KEY_ORDER = ['code', 'primary']
 
 
 def normalize_text(value):
@@ -38,6 +36,8 @@ def sanitize_yaml_value(value, key=None):
     if isinstance(value, str):
         if key == 'summary':
             return LiteralString(normalize_summary_text(value))
+        if key == 'title':
+            return LiteralString(normalize_text(value))
         return normalize_text(value)
     return value
 
@@ -45,14 +45,7 @@ def sanitize_yaml_value(value, key=None):
 def reorder_top_level_keys(show_data):
     if not isinstance(show_data, dict):
         return show_data
-    reordered = {}
-    for key in TOP_LEVEL_KEY_ORDER:
-        if key in show_data:
-            reordered[key] = show_data[key]
-    for key, value in show_data.items():
-        if key not in reordered:
-            reordered[key] = value
-    return reordered
+    return reorder_keys(show_data, TOP_LEVEL_KEY_ORDER)
 
 
 def remove_episode_code_fields(show_data):
@@ -86,8 +79,12 @@ CleanDumper.add_representer(LiteralString, lambda dumper, value: dumper.represen
 def write_yaml(show_data, target_path=None):
     target_path = P.ModelSetting.get('manual_target')
     filename = re.sub('[\\/:*?"<>|]', '', show_data['title']).replace('  ', ' ').replace('[]', '').strip()
+    clean_show_data = normalize_export_data(show_data)
+    if not P.ModelSetting.get_bool('is_primary') and P.ModelSetting.get_bool('delete_title'):
+        clean_show_data.pop('title', None)
+    clean_show_data = sanitize_yaml_value(clean_show_data)
+    # Normalize/serialize before opening the destination, so validation or dumper
+    # errors do not truncate an existing YAML file. Storage policy is unchanged.
+    output = yaml.dump(clean_show_data, Dumper=CleanDumper, sort_keys=False, allow_unicode=True, default_flow_style=False, width=4096)
     with open(os.path.join(target_path, filename + '.yaml'), 'w', encoding='utf-8') as outfile:
-        if not P.ModelSetting.get_bool('is_primary') and P.ModelSetting.get_bool('delete_title'):
-            del show_data['title']
-        clean_show_data = sanitize_yaml_value(reorder_top_level_keys(remove_episode_code_fields(show_data)))
-        yaml.dump(clean_show_data, outfile, Dumper=CleanDumper, sort_keys=False, allow_unicode=True, default_flow_style=False, width=4096)
+        outfile.write(output)

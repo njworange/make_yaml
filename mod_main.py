@@ -110,7 +110,11 @@ class ModuleMain(PluginModuleBase):
                     if P.ModelSetting.get_bool('is_primary') and ottcode is not None:
                         self.tmdb_code = 'FT'+str(ottcode.tmdb_search()) 
                         show_data = YAMLUTILS.tmdb_data(self.tmdb_code, show_data)
-                    YAMLUTILS.make_yaml(show_data)
+                    try:
+                        YAMLUTILS.make_yaml(show_data)
+                    except ValueError as e:
+                        logger.error(f'YAML export validation failed: {e}')
+                        return jsonify({'msg': 'YAML 데이터 형식 오류: 날짜/이미지/회차 정보를 확인하세요.', 'ret': 'fail'})
                     return jsonify({"msg":f"{get_site_name(site)} 코드 실행", "ret":"success"})
                 else:
                     return jsonify({"msg":f"{get_site_name(site)} 한글 메타데이터 아님", "ret":"fail"})

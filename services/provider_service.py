@@ -11,10 +11,10 @@ import requests
 
 from ..providers.legacy_registry import get_provider_class
 from ..setup import P
+from .episode_title import KOREAN_WEEKDAYS, format_korean_broadcast_date, strip_broadcast_prefix
 
 logger = P.logger
 
-KOREAN_WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
 WAVVE_API_PARAMS = {
     'apikey': 'E5F3E0D30947AA5440556471321BB6D9',
     'device': 'pc',
@@ -211,10 +211,9 @@ def extract_ebs_default_course_id(page_html, program_id):
 
 
 def normalize_ebs_episode_title(title):
-    title = decode_ebs_text(title)
+    title = strip_broadcast_prefix(decode_ebs_text(title))
     title = re.sub(r'^\d+\.\s*', '', title)
-    title = re.sub(r'^20\d{2}\.\d{2}\.\d{2}\([월화수목금토일]\)\s*', '', title)
-    return title.strip()
+    return strip_broadcast_prefix(title)
 
 
 def normalize_ebs_date(date_text):
@@ -371,12 +370,7 @@ def enrich_ebs_episode(episode):
         except Exception as e:
             logger.error(f"Exception:{str(e)}")
             logger.error(traceback.format_exc())
-    original_title = normalize_ebs_episode_title(episode.get('title', ''))
-    date_prefix = format_korean_broadcast_date(episode.get('originally_available_at', ''))
-    if date_prefix and original_title:
-        episode['title'] = f'{date_prefix} {original_title}'
-    elif original_title:
-        episode['title'] = original_title
+    episode['title'] = normalize_ebs_episode_title(episode.get('title', ''))
     episode.pop('_detail_path', None)
     return episode
 
@@ -539,8 +533,7 @@ def extract_prime_text(page_html):
 def normalize_prime_episode_title(title):
     text = decode_ebs_text(title)
     text = re.sub(r'^시즌\s*\d+\s*에피소드\s*\d+\s*-\s*', '', text)
-    text = re.sub(r'^20\d{2}\.\d{2}\.\d{2}\([월화수목금토일]\)\s*', '', text)
-    return text.strip()
+    return strip_broadcast_prefix(text)
 
 
 def extract_prime_episodes(page_html):
@@ -591,7 +584,7 @@ def extract_prime_episodes(page_html):
             j += 1
         episodes.append({
             'index': episode_index,
-            'title': f"{format_korean_broadcast_date(air_date)} {title}" if air_date and title else title,
+            'title': title,
             'summary': decode_ebs_text(' '.join(summary_lines)),
             'originally_available_at': air_date,
         })
@@ -1139,6 +1132,7 @@ def build_appletv_seasons_from_api(show_id):
 
 
 def enrich_appletv_episode(episode):
+    episode['title'] = strip_broadcast_prefix(episode.get('title'))
     episode_url = episode.get('url') or ''
     if not episode_url:
         return episode
@@ -1152,12 +1146,6 @@ def enrich_appletv_episode(episode):
             image_url = decode_ebs_text(episode_schema.get('image') or '')
             if image_url:
                 episode['thumbs'] = image_url
-        original_title = re.sub(r'^20\d{2}\.\d{2}\.\d{2}\([월화수목금토일]\)\s*', '', (episode.get('title') or '').strip())
-        date_prefix = format_korean_broadcast_date(episode.get('originally_available_at', ''))
-        if date_prefix and original_title:
-            episode['title'] = f'{date_prefix} {original_title}'
-        elif original_title:
-            episode['title'] = original_title
     except Exception as e:
         logger.error(f"Exception:{str(e)}")
         logger.error(traceback.format_exc())
@@ -1382,29 +1370,9 @@ def extract_wavve_orderby(program_id):
     return ''
 
 
-def extract_date_from_tving_thumb(url):
-    if not url:
-        return ''
-    match = re.search(r'/(20\d{2})(\d{2})(\d{2})/', url)
-    if not match:
-        return ''
-    return f'{match.group(1)}-{match.group(2)}-{match.group(3)}'
-
-
-def format_korean_broadcast_date(date_text):
-    if not date_text:
-        return ''
-    date_text = date_text[:10]
-    try:
-        parsed = datetime.strptime(date_text, '%Y-%m-%d')
-        return f"{parsed:%Y.%m.%d}({KOREAN_WEEKDAYS[parsed.weekday()]})"
-    except ValueError:
-        return ''
-
-
 def normalize_tving_episode_title(title):
-    title = (title or '').strip()
-    return re.sub(r'^\d+\.\s*', '', title)
+    title = strip_broadcast_prefix(title)
+    return strip_broadcast_prefix(re.sub(r'^\d+\.\s*', '', title))
 
 
 def fetch_wavve_episode_metadata(program_id, episode_count):
@@ -1480,30 +1448,19 @@ def normalize_wavve_show_data(program_id, show_data):
             if air_date:
                 episode['originally_available_at'] = air_date
                 logger.debug(f"Wavve episode normalized index={episode.get('index')} air_date={air_date} title={original_title}")
-            date_prefix = format_korean_broadcast_date(air_date)
-            if date_prefix and original_title:
-                episode['title'] = f'{date_prefix} {original_title}'
-            elif original_title:
-                episode['title'] = original_title
+            episode['title'] = original_title
     return show_data
 
 
 def normalize_tving_show_data(show_data):
     if not isinstance(show_data, dict):
         return show_data
+    show_data = copy.deepcopy(show_data)
     for season in show_data.get('seasons', []):
         for episode in season.get('episodes', []):
             original_title = normalize_tving_episode_title(episode.get('title', ''))
-            air_date = (episode.get('originally_available_at') or '').strip()
-            if not air_date:
-                air_date = extract_date_from_tving_thumb(episode.get('thumbs', ''))
-                if air_date:
-                    episode['originally_available_at'] = air_date
-            date_prefix = format_korean_broadcast_date(air_date)
-            if date_prefix and original_title:
-                episode['title'] = f'{date_prefix} {original_title}'
-            elif original_title:
-                episode['title'] = original_title
+            # An image URL's date is not evidence of the episode's broadcast date.
+            episode['title'] = original_title
     return show_data
 
 
@@ -1565,6 +1522,11 @@ def get_show_data(code):
         elif site == 'KW':
             show_data = normalize_wavve_show_data(site_code, show_data)
         if isinstance(show_data, dict):
+            show_data = copy.deepcopy(show_data)
+            if site in ('FN', 'FP', 'KE', 'FA') and not show_data.get('code') and site_code:
+                show_data['code'] = site + site_code
+            if site == 'FA' and isinstance(show_data.get('code'), str) and not show_data['code'].startswith('FA'):
+                show_data['code'] = 'FA' + show_data['code']
             show_data.setdefault('primary', False)
         if isinstance(show_data, dict):
             logger.debug(f"YAMLUTILS get_data result site={site} type=dict keys={list(show_data.keys())} seasons={len(show_data.get('seasons', []))}")
