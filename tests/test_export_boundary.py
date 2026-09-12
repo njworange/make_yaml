@@ -41,6 +41,7 @@ def load_module(name, path):
 
 titles = load_module(PACKAGE + '.services.episode_title', ROOT / 'services/episode_title.py')
 normalizer = load_module(PACKAGE + '.services.export_normalizer', ROOT / 'services/export_normalizer.py')
+tving_dates = load_module(PACKAGE + '.services.tving_date_enrichment', ROOT / 'services/tving_date_enrichment.py')
 writer = load_module(PACKAGE + '.services.yaml_service', ROOT / 'services/yaml_service.py')
 
 
@@ -60,6 +61,7 @@ def provider_namespace():
     env = {
         'copy': copy, 're': re, 'html': html, 'datetime': datetime,
         'strip_broadcast_prefix': titles.strip_broadcast_prefix,
+        'enrich_tving_dates': lambda code, value: value,
         'format_korean_broadcast_date': titles.format_korean_broadcast_date,
         'KOREAN_WEEKDAYS': list('월화수목금토일'), 'logger': Mock(),
         'traceback': SimpleNamespace(format_exc=lambda: 'stub traceback'),
@@ -480,6 +482,220 @@ class EpisodeTitleAndErrorTests(unittest.TestCase):
                 self.assertIn('YAML 데이터 형식 오류', response['msg'])
                 opened.assert_not_called()
                 env['logger'].error.assert_called_once()
+
+
+class TvingDateEnrichmentTests(unittest.TestCase):
+    @staticmethod
+    def show(episodes=None, season=1):
+        return {'code': 'KVP001', 'title': '작품', 'seasons': [
+            {'index': season, 'title': '시즌 제목', 'episodes': episodes if episodes is not None else [
+                {'index': 1, 'title': '한국어 회차', 'summary': '원본 요약'}]}]}
+
+    @staticmethod
+    def row(code='E001', frequency=1, day='20240229'):
+        return {'episode': {'code': code, 'frequency': frequency, 'broadcast_date': day,
+                            'synopsis': {'ko': '덮어쓰면 안 되는 요약'}, 'image': []}}
+
+    def run_enrich(self, show, pages=None, client=None):
+        if client is None:
+            client = SimpleNamespace(
+                get_program_programid=Mock(return_value={'code': 'P001', 'broad_dt': '19990101'}),
+                get_frequency_programid=Mock(side_effect=pages if pages is not None else [
+                    {'result': [self.row()], 'has_more': 'N'}]))
+        self.client = client
+        support = ModuleType('support_site')
+        support.SupportTving = client
+        before = copy.deepcopy(show)
+        with patch.dict(sys.modules, {'support_site': support}):
+            result = tving_dates.enrich_tving_dates('P001', show)
+        self.assertEqual(show, before)
+        return result
+
+    def test_code_priority_and_single_season_frequency_export(self):
+        original = self.show([{'index': 1, 'title': '원본 제목'},
+                              {'code': 'KVE002', 'index': 99, 'title': '2. 다른 제목'}])
+        result = self.run_enrich(original, [{'result': [self.row(), self.row('E002', 2, 20260301)],
+                                             'has_more': 'N'}])
+        episodes = result['seasons'][0]['episodes']
+        self.assertEqual([e['originally_available_at'] for e in episodes], ['2024-02-29', '2026-03-01'])
+        self.assertEqual([e['title'] for e in episodes], ['원본 제목', '2. 다른 제목'])
+        self.assertIsNot(result, original)
+        exported = normalizer.normalize_export_data(result)
+        self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2024.2.29(목) 원본 제목')
+        self.assertNotIn('code', exported['seasons'][0]['episodes'][1])
+        self.client.get_program_programid.assert_called_once_with('P001')
+        self.client.get_frequency_programid.assert_called_once_with('P001', page=1)
+        self.assertEqual(self.run_enrich(result), result)
+        self.client.get_program_programid.assert_not_called()
+
+    def test_existing_dates_and_all_other_fields_are_preserved(self):
+        for existing in ['2020-01-01', '2020.01.01', '2020-01-01T23:00:00Z',
+                         date(2020, 1, 1), 'not-a-date', [], False]:
+            show = self.show([{'index': 1, 'title': '제목', 'originally_available_at': existing}])
+            with self.subTest(existing=existing):
+                self.assertEqual(self.run_enrich(show), show)
+                self.client.get_program_programid.assert_not_called()
+        for empty in [None, '', '   ']:
+            show = self.show()
+            show['seasons'][0]['episodes'][0]['originally_available_at'] = empty
+            result = self.run_enrich(show)
+            expected = copy.deepcopy(show)
+            expected['seasons'][0]['episodes'][0]['originally_available_at'] = '2024-02-29'
+            self.assertEqual(result, expected)
+
+    def test_invalid_or_missing_broadcast_dates_never_use_other_dates(self):
+        for day in [None, '', '20230229', '20241301', '20240010', 0, True, {}, [],
+                    '2024.2.29', '1709164800', 'https://image/20240229/a', '20240229120000']:
+            with self.subTest(day=day):
+                show = self.show()
+                show['seasons'][0]['episodes'][0]['thumbs'] = 'https://image/20240229/a'
+                self.assertEqual(self.run_enrich(show, [{'result': [self.row(day=day)], 'has_more': 'N'}]), show)
+        row = self.row()
+        del row['episode']['broadcast_date']
+        self.assertEqual(self.run_enrich(self.show(), [{'result': [row], 'has_more': 'N'}]), self.show())
+
+    def test_remote_date_formats_use_existing_export_validator(self):
+        for day in ['20240229', 20240229, '2024-02-29', '2024.02.29', '2024-02-29T23:00:00+09:00']:
+            result = self.run_enrich(self.show(), [{'result': [self.row(day=day)], 'has_more': 'N'}])
+            self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+
+    def test_supplied_code_never_falls_back_and_accepts_raw_or_prefixed(self):
+        for code in ['E404', 'KVE404', 1, [], '   ']:
+            show = self.show([{'index': 1, 'code': code, 'title': '제목'}])
+            self.assertEqual(self.run_enrich(show), show)
+        for code in ['E001', 'KVE001']:
+            show = self.show([{'index': 999, 'code': code, 'title': '제목'}], season=4)
+            self.assertEqual(self.run_enrich(show)['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+
+    def test_frequency_scope_requires_unique_program_bound_season_one(self):
+        shows = [self.show(season=value) for value in [0, 2, None, True, 1.0, 'season 1']]
+        missing_code = self.show()
+        del missing_code['code']
+        shows.append(missing_code)
+        multi = self.show()
+        multi['seasons'].append({'index': 2, 'episodes': [{'index': 1, 'title': '시즌2'}]})
+        shows.append(multi)
+        for show in shows:
+            with self.subTest(show=show):
+                self.assertEqual(self.run_enrich(show), show)
+        show = self.show([{'index': '01', 'title': '제목'}], season='1')
+        result = self.run_enrich(show, [{'result': [self.row(frequency='01')], 'has_more': 'N'}])
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+        for value in [0, -1, True, 1.0, '1-2', '1회', None]:
+            self.assertEqual(self.run_enrich(self.show(), [{'result': [self.row(frequency=value)], 'has_more': 'N'}]), self.show())
+
+    def test_codes_can_match_across_seasons_without_frequency_inference(self):
+        show = self.show([{'index': 1, 'code': 'KVE001', 'title': '시즌1'}])
+        show['seasons'].append({'index': 2, 'episodes': [{'index': 1, 'code': 'E002', 'title': '시즌2'}]})
+        result = self.run_enrich(show, [{'result': [self.row(), self.row('E002', 1, '20260301')], 'has_more': 'N'}])
+        self.assertEqual([s['episodes'][0]['originally_available_at'] for s in result['seasons']],
+                         ['2024-02-29', '2026-03-01'])
+
+    def test_duplicate_source_keys_are_ambiguous_even_with_invalid_dates(self):
+        for episodes, rows in [
+            ([{'index': 1}], [self.row(), self.row('E002', 1)]),
+            ([{'index': 1, 'code': 'E001'}], [self.row(), self.row('E001', 2)]),
+            ([{'index': 1}], [self.row(), self.row('E001', 2)]),
+            ([{'index': 1}], [self.row(), self.row('E002', 1, 'bad')]),
+        ]:
+            show = self.show(episodes)
+            self.assertEqual(self.run_enrich(show, [{'result': rows, 'has_more': 'N'}]), show)
+
+    def test_duplicate_targets_and_mixed_code_frequency_claims_are_ambiguous(self):
+        for episodes in [
+            [{'index': 1}, {'index': 1}],
+            [{'index': 1}, {'index': 2, 'code': 'E001'}],
+            [{'index': 1}, {'index': 2, 'code': 'E001', 'originally_available_at': '2020-01-01'}],
+            [{'index': 1}, {'index': 1, 'code': 'E404'}],
+            [{'code': 'E001'}, {'code': 'KVE001'}],
+        ]:
+            show = self.show(episodes)
+            self.assertEqual(self.run_enrich(show), show)
+
+    def test_complete_pagination_and_late_duplicate_detection(self):
+        show = self.show([{'index': 1}, {'index': 2}])
+        pages = [{'result': [self.row()], 'has_more': 'Y'},
+                 {'result': [self.row('E002', 2, '20260301')], 'has_more': 'N'}]
+        result = self.run_enrich(show, pages)
+        self.assertEqual([e['originally_available_at'] for e in result['seasons'][0]['episodes']],
+                         ['2024-02-29', '2026-03-01'])
+        self.assertEqual([c.kwargs['page'] for c in self.client.get_frequency_programid.call_args_list], [1, 2])
+        pages[1] = {'result': [self.row('E002', 1)], 'has_more': 'N'}
+        self.assertEqual(self.run_enrich(show, pages), show)
+
+    def test_partial_empty_repeated_and_capped_pages_discard_all_updates(self):
+        first = {'result': [self.row()], 'has_more': 'Y'}
+        for tail in [RuntimeError('synthetic failure'), {'result': [], 'has_more': 'Y'},
+                     first, {'result': [self.row()], 'has_more': 'N'}, {}, None]:
+            with self.subTest(tail=tail):
+                self.assertEqual(self.run_enrich(self.show(), [first, tail]), self.show())
+                self.assertEqual(self.client.get_frequency_programid.call_count, 2)
+        pages = [{'result': [self.row(f'E{i:03}', i)], 'has_more': 'Y'}
+                 for i in range(1, tving_dates.MAX_PAGES + 1)]
+        self.assertEqual(self.run_enrich(self.show(), pages), self.show())
+        self.assertEqual(self.client.get_frequency_programid.call_count, tving_dates.MAX_PAGES)
+        pages[-1]['has_more'] = 'N'
+        self.assertIn('originally_available_at', self.run_enrich(self.show(), pages)['seasons'][0]['episodes'][0])
+        result = self.run_enrich(self.show(), [first, {'result': [], 'has_more': 'N'}])
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+
+    def test_malformed_payload_and_program_identity_fail_closed(self):
+        for payload in [None, [], '', {}, {'result': []}, {'result': [], 'has_more': True},
+                        {'result': {}, 'has_more': 'N'}, {'result': [None], 'has_more': 'N'},
+                        {'result': [{'episode': []}], 'has_more': 'N'},
+                        {'result': [{}], 'has_more': 'N'}, {'result': [], 'has_more': 'N'}]:
+            self.assertEqual(self.run_enrich(self.show(), [payload]), self.show())
+        for program in [None, {}, {'code': 'P002'}, {'code': '0000'}, {'code': 1}]:
+            client = SimpleNamespace(get_program_programid=Mock(return_value=program),
+                                     get_frequency_programid=Mock())
+            self.assertEqual(self.run_enrich(self.show(), client=client), self.show())
+            client.get_frequency_programid.assert_not_called()
+        show = self.show()
+        show['code'] = 'KVP002'
+        self.assertEqual(self.run_enrich(show), show)
+        self.client.get_program_programid.assert_not_called()
+
+    def test_missing_plugin_methods_and_api_errors_are_safe(self):
+        show = self.show()
+        with patch.object(tving_dates.importlib, 'import_module', side_effect=ImportError('missing')):
+            self.assertEqual(tving_dates.enrich_tving_dates('P001', show), show)
+        with patch.dict(sys.modules, {'support_site': ModuleType('support_site')}):
+            self.assertEqual(tving_dates.enrich_tving_dates('P001', show), show)
+        for client in [SimpleNamespace(),
+                       SimpleNamespace(get_program_programid=Mock(side_effect=RuntimeError('auth/network failure'))),
+                       SimpleNamespace(get_program_programid=Mock(return_value={'code': 'P001'}))]:
+            self.assertEqual(self.run_enrich(show, client=client), show)
+
+    def test_invalid_local_data_does_not_trigger_optional_io(self):
+        for show in [None, [], '', {}, {'seasons': {}}, {'seasons': [None]},
+                     {'seasons': [{'index': 1, 'episodes': {}}]},
+                     {'seasons': [{'index': 1, 'episodes': [None]}]}]:
+            self.assertEqual(self.run_enrich(show), show)
+            self.client.get_program_programid.assert_not_called()
+
+    def test_provider_boundary_failure_success_and_split_order(self):
+        for fail in (False, True):
+            show = self.show([{'index': 1, 'code': 'KVE001', 'title': '1. 한국어 제목'}])
+            before = copy.deepcopy(show)
+            env = provider_namespace()
+            env['enrich_tving_dates'] = tving_dates.enrich_tving_dates
+            env['get_provider_class'] = lambda site: SimpleNamespace(make_data=lambda code: show)
+            env['P'].ModelSetting.get_int = lambda key: 2
+            client = SimpleNamespace(
+                get_program_programid=Mock(return_value={'code': 'P001'}),
+                get_frequency_programid=Mock(side_effect=RuntimeError('failure') if fail else None,
+                    return_value={'result': [self.row()], 'has_more': 'N'}))
+            support = ModuleType('support_site')
+            support.SupportTving = client
+            with patch.dict(sys.modules, {'support_site': support}):
+                result = env['get_show_data']('KVP001')
+            self.assertEqual(show, before)
+            self.assertEqual([s['index'] for s in result['seasons']], [1, 101])
+            for season in result['seasons']:
+                self.assertEqual(season['episodes'][0]['title'], '한국어 제목')
+                self.assertEqual('originally_available_at' in season['episodes'][0], not fail)
+            normalizer.normalize_export_data(result)  # both paths remain valid export input
+            client.get_frequency_programid.assert_called_once()
 
 
 if __name__ == '__main__':

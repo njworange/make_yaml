@@ -12,6 +12,7 @@ import requests
 from ..providers.legacy_registry import get_provider_class
 from ..setup import P
 from .episode_title import KOREAN_WEEKDAYS, format_korean_broadcast_date, strip_broadcast_prefix
+from .tving_date_enrichment import enrich_tving_dates
 
 logger = P.logger
 
@@ -1519,6 +1520,7 @@ def get_show_data(code):
                 show_data = provider_class.make_data(site_code)
         if site == 'KV':
             show_data = normalize_tving_show_data(show_data)
+            show_data = enrich_tving_dates(site_code, show_data)
         elif site == 'KW':
             show_data = normalize_wavve_show_data(site_code, show_data)
         if isinstance(show_data, dict):
