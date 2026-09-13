@@ -43,6 +43,7 @@ def load_module(name, path):
 titles = load_module(PACKAGE + '.services.episode_title', ROOT / 'services/episode_title.py')
 normalizer = load_module(PACKAGE + '.services.export_normalizer', ROOT / 'services/export_normalizer.py')
 coupang = load_module(PACKAGE + '.services.coupang_provider', ROOT / 'services/coupang_provider.py')
+disney = load_module(PACKAGE + '.services.disney_provider', ROOT / 'services/disney_provider.py')
 codes = load_module(PACKAGE + '.services.code_service', ROOT / 'services/code_service.py')
 tving_dates = load_module(PACKAGE + '.services.tving_date_enrichment', ROOT / 'services/tving_date_enrichment.py')
 writer = load_module(PACKAGE + '.services.yaml_service', ROOT / 'services/yaml_service.py')
@@ -57,6 +58,10 @@ def provider_namespace():
         'normalize_prime_episode_title', 'normalize_prime_date', 'extract_prime_text',
         'extract_prime_episodes', 'enrich_appletv_episode', 'normalize_appletv_date',
         'normalize_wavve_show_data',
+        'fetch_appletv_api_episodes', 'build_appletv_seasons_from_api', 'build_appletv_show_data',
+        'extract_appletv_season_blocks', 'extract_appletv_season_titles',
+        'extract_appletv_current_season_title', 'extract_appletv_episodes',
+        'extract_appletv_src_from_srcset', 'extract_appletv_code_from_url', 'normalize_appletv_image_url',
     }
     path = ROOT / 'services/provider_service.py'
     tree = ast.parse(path.read_text())
@@ -66,6 +71,7 @@ def provider_namespace():
         'strip_broadcast_prefix': titles.strip_broadcast_prefix,
         'enrich_tving_dates': lambda code, value: value,
         'extract_coupang_title_code': coupang.extract_coupang_title_code,
+        'uses_disney_public_route': disney.uses_disney_public_route,
         'format_korean_broadcast_date': titles.format_korean_broadcast_date,
         'KOREAN_WEEKDAYS': list('월화수목금토일'), 'logger': Mock(),
         'traceback': SimpleNamespace(format_exc=lambda: 'stub traceback'),
@@ -1119,6 +1125,234 @@ class CoupangProviderTests(unittest.TestCase):
             show, get = self.run_builder([self.response(self.detail(2))])
             self.assertIsNone(show)
             self.assertEqual(get.call_count, 1)
+
+
+class AppleSeasonRegressionTests(unittest.TestCase):
+    def test_api_zero_season_survives_fetch_and_grouping(self):
+        env = provider_namespace()
+        rows = [{'id': 'special', 'seasonNumber': 0, 'episodeNumber': 1, 'title': '스페셜'},
+                {'id': 'regular', 'seasonNumber': 1, 'episodeNumber': 2, 'title': '정규'},
+                {'id': 'missing', 'episodeNumber': 3, 'title': '미지정'}]
+        before = copy.deepcopy(rows)
+        env['APPLE_TV_UTS_PARAMS'] = {}
+        env['fetch_appletv_json'] = Mock(return_value={'data': {'totalEpisodeCount': 3, 'episodes': rows}})
+        env['enrich_appletv_episode'] = lambda item: item
+        fetched = env['fetch_appletv_api_episodes']('show')
+        self.assertEqual([e['season_number'] for e in fetched], [0, 1, 1])
+        env['fetch_appletv_api_episodes'] = lambda show: fetched
+        snapshot = copy.deepcopy(fetched)
+        seasons = env['build_appletv_seasons_from_api']('show')
+        self.assertEqual([s['index'] for s in seasons], [0, 1])
+        self.assertEqual([e['index'] for e in seasons[1]['episodes']], [2, 3])
+        self.assertEqual(rows, before)
+        self.assertEqual(fetched, snapshot)
+        self.assertNotIn('season_number', seasons[0]['episodes'][0])
+
+    def apple_env(self, api_result):
+        env = provider_namespace()
+        blocks = []
+        for season in (0, 1, 2):
+            blocks.append(f'<h2 class="title"><span class="dir-wrapper">시즌 {season}</span></h2>'
+                          f'<a href="https://tv.apple.com/kr/episode/name/umc.cmc.ep{season}">'
+                          '<div class="tag">에피소드 7</div><div class="title">제목</div>'
+                          '<div class="description">요약</div><div class="duration">30분</div></a>')
+        env['fetch_appletv_html'] = Mock(return_value='<main>' + ''.join(blocks) + '</main>')
+        env['extract_appletv_json_ld'] = lambda *args: {'name': '작품', 'description': '설명'}
+        env['extract_appletv_meta_content'] = lambda *args: ''
+        env['extract_appletv_genres'] = lambda *args: []
+        env['extract_appletv_personnel'] = lambda *args: []
+        env['enrich_appletv_episode'] = lambda item: item
+        env['build_appletv_seasons_from_api'] = (Mock(side_effect=api_result) if isinstance(api_result, Exception)
+                                                else Mock(return_value=api_result))
+        return env
+
+    def test_html_fallback_collects_every_available_block(self):
+        for result in ([], RuntimeError('API unavailable')):
+            env = self.apple_env(result)
+            show = env['build_appletv_show_data']('umc.cmc.show')
+            self.assertEqual([s['index'] for s in show['seasons']], [0, 1, 2])
+            self.assertEqual([s['episodes'][0]['index'] for s in show['seasons']], [7, 7, 7])
+
+    def test_nonempty_api_remains_authoritative(self):
+        api = [{'index': 0, 'episodes': [{'index': 2}]}]
+        env = self.apple_env(api)
+        env['extract_appletv_episodes'] = Mock(side_effect=AssertionError('HTML must not merge with API'))
+        self.assertEqual(env['build_appletv_show_data']('umc.cmc.show')['seasons'], api)
+        env['extract_appletv_episodes'].assert_not_called()
+
+
+class DisneyPublicTests(unittest.TestCase):
+    ID = '5acf7909-5d2f-494e-91a9-2fe0555c220f'
+    IMAGE = '01a0329b-91ec-73cc-ae49-b8982778e95c'
+
+    def row(self, season, index=1, korean=False):
+        prefix = f'시즌 {season}: {index}회' if korean else f'S{season}:E{index}'
+        return {'_id': f'episode-{season}-{index}', 'title': prefix + ' 제목',
+                'metadata': {'summary': '원본 요약'}, 'imageVariants': {
+                    'defaultImage': {'source': '', 'ripcutId': self.IMAGE}}}
+
+    def payload(self):
+        block = {'_type': 'Episodes', 'seriesTitle': '작품',
+                 'seasons': [{'id': 's1', 'name': 'Season 1'}, {'id': 's2', 'name': 'Season 2'}],
+                 'selectedSeasonId': 's2', 'episodes': [self.row(2, 3), self.row(2, 1)],
+                 'seoSeasons': [{'seasonId': 's1', 'seasonName': 'Season 1', 'episodes': [self.row(1)]}]}
+        return {'query': {'slug': 'entity-' + self.ID}, 'props': {'pageProps': {'stitchDocument': {
+            'mainContent': [{'_type': 'MediaDetails', 'title': '작품', 'summary': '작품 설명',
+                             'release': '2025 – 2026'}, block]}}}}
+
+    def block(self, data):
+        return data['props']['pageProps']['stitchDocument']['mainContent'][1]
+
+    def page(self, data):
+        return '<script type="application/json" id="__NEXT_DATA__">' + json.dumps(data) + '</script>'
+
+    def build(self, data):
+        response = Mock(status_code=200, text=self.page(data))
+        get = Mock(return_value=response)
+        show = disney.build_disney_show_data(self.ID, http_get=get)
+        self.assertEqual(get.call_count, 1)
+        response.close.assert_called_once()
+        return show
+
+    def test_selected_and_seo_union_covers_two_seasons_in_one_request(self):
+        data = self.payload()
+        before = copy.deepcopy(data)
+        show = self.build(data)
+        self.assertEqual(data, before)
+        self.assertEqual(show['code'], 'FD' + self.ID)
+        self.assertEqual([s['index'] for s in show['seasons']], [1, 2])
+        self.assertEqual([e['index'] for e in show['seasons'][1]['episodes']], [1, 3])
+        episode = show['seasons'][0]['episodes'][0]
+        self.assertEqual(episode['title'], '제목')
+        self.assertEqual(episode['summary'], '원본 요약')
+        self.assertIn('/' + self.IMAGE + '/compose?', episode['thumbs'])
+        self.assertNotIn('originally_available_at', episode)
+        self.assertEqual(normalizer.normalize_export_data(show)['seasons'][0]['episodes'][0]['title'], '제목')
+
+    def test_single_korean_season_and_title_only_prefix(self):
+        data = self.payload()
+        block = self.block(data)
+        block.update(seasons=[{'id': 's0', 'name': '시즌 0'}], selectedSeasonId='s0',
+                     episodes=[self.row(0, 0, True)], seoSeasons=[])
+        block['episodes'][0]['title'] = '시즌 0: 0회'
+        show = self.build(data)
+        self.assertEqual(show['seasons'][0]['index'], 0)
+        self.assertEqual(show['seasons'][0]['episodes'][0]['title'], '')
+
+    def test_identical_overlap_deduplicated_but_conflicts_fail(self):
+        data = self.payload()
+        block = self.block(data)
+        block['seoSeasons'].append({'seasonId': 's2', 'episodes': copy.deepcopy(block['episodes'])})
+        self.assertEqual(len(self.build(data)['seasons'][1]['episodes']), 2)
+        block['seoSeasons'][-1]['episodes'][0]['title'] += ' 충돌'
+        self.assertIsNone(self.build(data))
+
+    def test_missing_season_and_unknown_mapping_fail_closed(self):
+        for change in ('missing', 'third', 'unknown', 'wrong_number', 'duplicate_number'):
+            data = self.payload(); block = self.block(data)
+            if change == 'missing': block['seoSeasons'] = []
+            elif change == 'third': block['seasons'].append({'id': 's3', 'name': 'Season 3'})
+            elif change == 'unknown': block['selectedSeasonId'] = 'unknown'
+            elif change == 'wrong_number': block['episodes'][0]['title'] = 'S9:E3 제목'
+            else: block['seasons'][1]['name'] = 'Season 1'
+            self.assertIsNone(self.build(data), change)
+
+    def test_unsupported_movie_malformed_titles_and_identity_fail(self):
+        cases = []
+        data = self.payload(); data['props']['pageProps']['stitchDocument']['mainContent'].pop(); cases.append(data)
+        data = self.payload(); data['query']['slug'] = 'entity-other'; cases.append(data)
+        for value in ('예고편', '', 'S1:E2title', None, 123):
+            data = self.payload(); self.block(data)['episodes'][0]['title'] = value; cases.append(data)
+        for data in cases: self.assertIsNone(self.build(data))
+
+    def test_image_source_precedence_and_unavailable_images_omitted(self):
+        data = self.payload(); row = self.block(data)['episodes'][0]
+        row['imageVariants']['smallImage'] = {'source': 'https://example.invalid/actual.jpg'}
+        self.assertEqual(self.build(data)['seasons'][1]['episodes'][1]['thumbs'], 'https://example.invalid/actual.jpg')
+        for variants in (None, {}, {'defaultImage': {'source': '', 'imageId': self.IMAGE}},
+                         {'defaultImage': {'ripcutId': 'invalid'}}):
+            row['imageVariants'] = variants
+            self.assertNotIn('thumbs', self.build(data)['seasons'][1]['episodes'][1])
+
+    def test_http_errors_no_retries_or_legacy_fallback(self):
+        for failure in (RuntimeError('private-token'), Mock(status_code=403), Mock(status_code=302),
+                        Mock(status_code=200, text='<html>login</html>')):
+            get = Mock(side_effect=[failure])
+            setup.P.logger.reset_mock()
+            self.assertIsNone(disney.build_disney_show_data(self.ID, http_get=get))
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(get.call_args.kwargs['timeout'], (5, 15))
+            self.assertFalse(get.call_args.kwargs['allow_redirects'])
+            self.assertNotIn('private-token', str(setup.P.logger.mock_calls))
+
+    def test_entity_urls_and_public_dispatch_preserve_legacy_series(self):
+        for value in (self.ID, 'entity-' + self.ID, 'https://www.disneyplus.com/en-jp/browse/entity-' + self.ID + '?x=1'):
+            env = provider_namespace(); legacy = Mock()
+            env['get_provider_class'] = lambda site: legacy
+            env['build_disney_show_data'] = Mock(return_value=None)
+            self.assertIsNone(env['get_show_data']('FD' + value))
+            legacy.make_data.assert_not_called()
+            env['build_disney_show_data'].assert_called_once_with(value)
+        env['get_show_data']('FDlegacy-series-code')
+        legacy.make_data.assert_called_once_with('legacy-series-code')
+        self.assertIn('/ko-kr/', disney.disney_entity_input(self.ID)[1])
+        self.assertIn('/en-jp/', disney.disney_entity_input('https://www.disneyplus.com/en-jp/browse/entity-' + self.ID)[1])
+        url = 'https://www.disneyplus.com/en-jp/browse/entity-' + self.ID
+        self.assertEqual(codes.sort_code(['DSNP'], [url]), 'FD' + self.ID)
+        self.assertEqual(codes.sort_code(['DSNP'], ['https://www.disneyplus.com/ko-kr/series/name/legacy123']), 'FDlegacy123')
+        self.assertFalse(disney.disney_entity_input('https://evil.invalid/browse/entity-' + self.ID)[0])
+
+    def test_command_bypasses_legacy_title_resolver_for_entity(self):
+        path = ROOT / 'services/disney_service.py'
+        node = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef))
+        env = {'uses_disney_public_route': disney.uses_disney_public_route,
+               'disney_entity_input': disney.disney_entity_input, 'jsonify': lambda payload: payload,
+               'resolve_input': Mock(side_effect=AssertionError('unexpected title search')),
+               'is_disney_entity_code': lambda value: False}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), 'exec'), env)
+        self.assertEqual(env['handle_disney_command']('entity-' + self.ID, 'test'), ('FDentity-' + self.ID, None))
+        self.assertEqual(env['handle_disney_command']('legacy123', 'test'), ('FDlegacy123', None))
+        self.assertEqual(env['handle_disney_command']('entity-invalid', 'test')[1]['ret'], 'fail')
+        env['resolve_input'].assert_not_called()
+
+    def test_three_season_union_and_public_route_without_legacy_class(self):
+        data = self.payload(); block = self.block(data)
+        block['seoSeasons'].append({'seasonId': 's2', 'episodes': block['episodes']})
+        block['seasons'].append({'id': 's3', 'name': 'Season 3'})
+        block.update(selectedSeasonId='s3', episodes=[self.row(3)])
+        show = self.build(data)
+        self.assertEqual([s['index'] for s in show['seasons']], [1, 2, 3])
+        env = provider_namespace()
+        env['get_provider_class'] = lambda site: None
+        env['build_disney_show_data'] = Mock(return_value=show)
+        self.assertEqual(env['get_show_data']('FD' + self.ID), show)
+        self.assertIsNone(codes.sort_code(['DSNP'], ['https://www.disneyplus.com/ko-kr/browse/entity-invalid']))
+
+    def test_broken_duplicate_oversized_next_data_fail_safely(self):
+        for page in ('<script id="__NEXT_DATA__">null</script>',
+                     '<script id="__NEXT_DATA__">{</script>', self.page(self.payload()) * 2,
+                     self.page(self.payload()).replace('</script>', '')):
+            get = Mock(return_value=Mock(status_code=200, text=page))
+            self.assertIsNone(disney.build_disney_show_data(self.ID, http_get=get))
+        with patch.object(disney, 'MAX_PAGE_SIZE', 10):
+            self.assertIsNone(self.build(self.payload()))
+        with patch.object(disney, 'MAX_SEASONS', 1):
+            self.assertIsNone(self.build(self.payload()))
+
+    def test_disney_command_failure_never_exports(self):
+        path = ROOT / 'mod_main.py'
+        cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef))
+        command = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'process_command')
+        utils = SimpleNamespace(get_data=Mock(return_value=None), make_yaml=Mock())
+        env = {'jsonify': lambda payload: payload, 'logger': Mock(),
+               'is_command_enabled': lambda command: True,
+               'handle_disney_command': lambda arg, mode: ('FD' + self.ID, None),
+               'has_show_data': lambda value: value not in (None, [], ''), 'YAMLUTILS': utils}
+        exec(compile(ast.Module(body=[command], type_ignores=[]), str(path), 'exec'), env)
+        for mode in ('test', ''):
+            result = env['process_command'](SimpleNamespace(), 'dsnp_code', self.ID, mode, '', None)
+            self.assertEqual(result['ret'], 'fail')
+        utils.make_yaml.assert_not_called()
 
 
 if __name__ == '__main__':

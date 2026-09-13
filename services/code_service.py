@@ -11,7 +11,7 @@ REGEX_BY_PROVIDER_KEY = {
     'tving': r'tving\.(com\/contents)\/(?P<code>[^#].*?)$',
     'coupang': COUPANG_URL_PATTERN,
     'nf': r'netflix\.com\/(?:(?:[a-z]{2}(?:-[a-z]{2})?)\/)?title\/(?P<code>[^/#?]+)',
-    'dsnp': r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&]+)',
+    'dsnp': r'^https?://(?:www\.)?disneyplus\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:series/[^/]+/(?P<code>[A-Za-z0-9-]+)|browse/entity-(?P<code2>[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}))/?(?:[?#].*)?$',
     'atvp': r'apple.com/.*?(?P<code>umc.cmc.[a-zA-Z0-9]+)$',
     'amzn': r'(?:gti\.(?P<code>[a-zA-Z0-9-]+)|primevideo\.com\/(?:-\/[^/]+\/)?detail(?:\/[^/]+)?\/(?P<code2>[A-Z0-9]{10,}))',
     'ebs': r'anikids\.ebs\.co\.kr\/anikids\/program\/show\/(?P<code>[A-Za-z0-9]+)',

@@ -14,6 +14,7 @@ from ..setup import P
 from .episode_title import KOREAN_WEEKDAYS, format_korean_broadcast_date, strip_broadcast_prefix
 from .tving_date_enrichment import enrich_tving_dates
 from .coupang_provider import build_coupang_show_data, extract_coupang_title_code
+from .disney_provider import build_disney_show_data, uses_disney_public_route
 
 logger = P.logger
 
@@ -1114,7 +1115,9 @@ def build_appletv_seasons_from_api(show_id):
     api_episodes = fetch_appletv_api_episodes(show_id)
     seasons_by_number = {}
     for episode in api_episodes:
-        season_number = int(episode.pop('season_number', 1) or 1)
+        episode = copy.deepcopy(episode)
+        raw_season_number = episode.pop('season_number', None)
+        season_number = int(raw_season_number) if raw_season_number is not None else 1
         season = seasons_by_number.setdefault(season_number, {
             'index': season_number,
             'title': f'시즌 {season_number}',
@@ -1174,21 +1177,20 @@ def build_appletv_show_data(show_id):
     except Exception as e:
         logger.error(f"Exception:{str(e)}")
         logger.error(traceback.format_exc())
-    for season_title, season_body in season_blocks:
-        if seasons:
-            break
-        season_number_match = re.search(r'(\d+)', season_title)
-        season_index = int(season_number_match.group(1)) if season_number_match else len(seasons) + 1
-        episodes = extract_appletv_episodes(season_body)
-        if not episodes:
-            continue
-        episodes = [enrich_appletv_episode(episode) for episode in episodes]
-        seasons.append({
-            'index': season_index,
-            'title': season_title,
-            'summary': '',
-            'episodes': episodes,
-        })
+    if not seasons:
+        for season_title, season_body in season_blocks:
+            season_number_match = re.search(r'(\d+)', season_title)
+            season_index = int(season_number_match.group(1)) if season_number_match else len(seasons) + 1
+            episodes = extract_appletv_episodes(season_body)
+            if not episodes:
+                continue
+            episodes = [enrich_appletv_episode(episode) for episode in episodes]
+            seasons.append({
+                'index': season_index,
+                'title': season_title,
+                'summary': '',
+                'episodes': episodes,
+            })
     if not seasons:
         current_season_title = extract_appletv_current_season_title(page_html)
         current_episodes = extract_appletv_episodes(page_html)
@@ -1484,12 +1486,15 @@ def get_show_data(code):
         elif site == 'KC':
             site_code = extract_coupang_title_code(site_code)
         logger.debug(f"YAMLUTILS get_data parsed site={site} code={site_code}")
+        public_disney = site == 'FD' and uses_disney_public_route(site_code)
         provider_class = get_provider_class(site)
-        if provider_class is None and site not in ['KE', 'FA', 'FP', 'FN', 'KC']:
+        if provider_class is None and site not in ['KE', 'FA', 'FP', 'FN', 'KC'] and not public_disney:
             return None
         show_data = None
         if site == 'KC':
             show_data = build_coupang_show_data(site_code)
+        elif public_disney:
+            show_data = build_disney_show_data(site_code)
         elif site == 'KE':
             try:
                 show_data = build_ebs_show_data(site_code)
@@ -1521,7 +1526,7 @@ def get_show_data(code):
                 logger.debug(f"Prime public parse empty; falling back to legacy site={site} code={site_code}")
             elif site == 'FN':
                 logger.debug(f"Netflix public parse empty; falling back to legacy site={site} code={site_code}")
-            if site not in ('FA', 'KC') and provider_class is not None:
+            if site not in ('FA', 'KC') and not public_disney and provider_class is not None:
                 show_data = provider_class.make_data(site_code)
         if site == 'KV':
             show_data = normalize_tving_show_data(show_data)

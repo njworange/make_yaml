@@ -105,6 +105,8 @@ class ModuleMain(PluginModuleBase):
             show_data = YAMLUTILS.get_data(self.code)
             if site == 'KC' and not has_show_data(show_data):
                 return jsonify({'ret': 'fail', 'msg': '쿠팡플레이 메타데이터 조회 실패. COUPANG_PUBLIC 로그를 확인하세요.'})
+            if site == 'FD' and not has_show_data(show_data):
+                return jsonify({'ret': 'fail', 'msg': '디즈니 메타데이터 조회 실패. 시즌/회차 정보가 불완전하거나 지원되지 않는 입력입니다.'})
             if arg2 == 'test':
                 return jsonify({'ret':'success', 'json': show_data})
             elif has_show_data(show_data):

@@ -74,7 +74,7 @@ EBSKIDS https://anikids.ebs.co.kr/anikids/program/show/10024440 에서 ***100244
 - 애플 TV: public parser 기반 episode parser 가능
 - EBSKIDS: public parser 기반 episode parser 가능
 - 넷플릭스: public parser 기반 episode parser 가능
-- 디즈니플러스: public parser 기준 show-level 메타데이터까지만 확인, episode-level parser 는 아직 보류
+- 디즈니플러스: entity 공개 페이지의 한국어/영어 시즌·회차 parser (1.0.35부터, 아래 제한 참고)
 - 쿠팡플레이: 비로그인 공개 metadata API 기반 시즌/회차 parser (1.0.34부터)
 
 
@@ -85,8 +85,60 @@ EBSKIDS https://anikids.ebs.co.kr/anikids/program/show/10024440 에서 ***100244
 - 애플 TV: public page + 공개 메타데이터 기반으로 동작한다. 다중 시즌 수집까지 반영되어 있다.
 - EBSKIDS: 공개 program page와 episode detail page JSON-LD 를 사용한다. episode summary 와 날짜 prefix title 이 반영되어 있다.
 - 넷플릭스: public title page 기반 parser 가 추가되어 episode title, summary, 썸네일 추출이 가능하다. 다만 현재 공개 페이지 기준으로 episode 날짜 정보는 확인하지 못했다.
-- 디즈니플러스: public parser 기준으로 entity page 의 title, summary, image, year, cast 같은 show-level 메타데이터는 공개되어 있으나, episode/season payload 는 아직 확보하지 못했다. legacy provider 경로는 별도로 남아 있다.
+- 디즈니플러스: 공개 entity 페이지의 선택 시즌 + SEO 시즌을 합친다. 목록에 있는 시즌 데이터가 누락되면 부분 결과를 저장하지 않는다. 기존 series 코드의 legacy 경로는 별도로 유지한다.
 - 쿠팡플레이: 공개 작품/시즌별 회차 API 사용. 실패 시 미검증 legacy provider로 fallback하지 않는다.
+
+###### **<AppleTV 시즌 처리 수정 (1.0.35)>**
+
+- API의 `seasonNumber=0`은 fetch 단계에서 이미 보존되었으나, 시즌별 그룹화에서 `or 1` 때문에
+  시즌 1로 바뀌었다. 그룹화에서도 0을 유지하고, 값이 `None`/누락일 때만 1을 기본값으로 쓴다.
+- API 결과가 비어 있거나 예외인 경우, HTML에 실제로 존재하는 모든 시즌 블록을 읽는다.
+  첫 HTML 시즌을 추가한 뒤 반복을 중단하던 조건을 제거했다. API 결과가 있으면 기존처럼 API만 사용한다.
+- 이것은 HTML에 없는 시즌을 새로 요청하거나 모든 selector 항목의 회차를 확보하는 기능이 아니다.
+  기존 API pagination/날짜 보강/회차 번호 처리와 `split_season` 정책은 그대로다.
+
+###### **<Disney+ 공개 entity provider (1.0.35)>**
+
+디즈니 코드 입력에는 entity UUID, `entity-<uuid>`, 또는
+`https://www.disneyplus.com/ko-kr/browse/entity-<uuid>`를 사용할 수 있다.
+raw ID는 한국어 `ko-kr` 페이지를 요청하고, URL 입력은 지정된 locale을 유지한다.
+따라서 `/en-jp/` URL은 영어 데이터가 나올 수 있다. 기존 한국어 판정은 우회하지 않으므로
+한국어 YAML이 필요하면 raw ID 또는 `/ko-kr/` URL을 사용한다. 다른 언어로 자동 재시도하지 않는다.
+작품 코드는 `FD<entity-uuid>`이며 옛 legacy series ID로 추측 변환하지 않는다.
+
+- `__NEXT_DATA__`의 `query.slug`가 요청 entity와 일치하는지 확인하고
+  `props.pageProps.stitchDocument.mainContent`의 유일한 `_type=Episodes` 블록을 읽는다.
+- `episodes`는 `selectedSeasonId`의 회차이고, `seoSeasons`는 **다른 시즌들의 데이터**를 담을 수 있다.
+  실제 확인한 2시즌 작품에서는 selected=시즌 2(2회차), SEO=시즌 1(6회차)이므로
+  **한 HTML의 두 배열을 합치면 선언된 두 시즌을 얻을 수 있었다.** `seoSeasons` 길이 1만 보고
+  나머지 시즌이 없다고 판단하지 않는다. `?selectedSeasonId=<시즌1 ID>` 확인 요청은 선택 시즌을
+  바꾸지 않았으므로 이 파라미터를 시즌 전환 API로 구현하지 않았다.
+- 시즌 이름 `Season N` / `시즌 N`, 회차 제목 `S{N}:E{M} 제목` / `시즌 {N}: {M}회 제목`만
+  명시적으로 파싱한다. 번호와 원제목을 분리하고 번호 그대로 정렬한다. 0도 보존한다.
+  선언된 season ID/번호가 일치해야 하며 임의 재번호 부여, 제목 기반 작품 재검색은 하지 않는다.
+  동일 회차의 완전히 동일한 중복은 제거하고, ID/번호/내용 충돌은 전체 실패로 처리한다.
+- 선언된 모든 시즌에 회차가 있어야 성공한다(최대 30시즌). 3시즌 이상도 두 배열이 모든 시즌을
+  포함하면 파싱 가능하지만, 빠진 시즌은 임의 쿼리로 채우거나 부분 export하지 않고 실패한다.
+  시즌별 총 회차 수/별도 pagination 계약은 미확인이므로 시즌 내 전체 히스토리의 완전성을 보장하지 않는다.
+- 요약은 회차 `metadata.summary`. 썸네일은 `imageVariants.*.source`가 있으면 우선 사용한다.
+  source가 비어 있으면 유효한 **ripcutId**로 공개 페이지에서 관찰된 다음 이미지 템플릿을 사용한다:
+  `https://disney.images.edge.bamgrid.com/ripcut-delivery/v2/variant/disney/{ripcutId}/compose?format=webp&width=720`.
+  회차 `_id`와 이미지 `ripcutId`는 다른 값이다. 실제 회차 ripcutId의 HEAD 요청은 HTTP 200/image/webp로
+  확인했으나 모든 이미지의 향후 가용성을 보장하지 않는다. 둘 다 없으면 thumbs를 생략한다.
+  `_id`나 미확인 imageId로 이미지 URL을 지어내지 않는다. 추가 이미지 확인 요청은 runtime에서 하지 않는다.
+- **회차 방영일은 확보하지 못했다.** `originally_available_at`은 생략한다. 작품의 `2025 – 2026` 같은
+  연도 범위를 회차 날짜로 만들지 않는다. 작품/시즌 포스터도 이 collector에서는 별도로 채우지 않는다.
+- 영화/단편처럼 확인된 시즌·회차 구조가 없는 경우는 미지원이다. 제목 형식 변경, JSON 오류, 불완전
+  시즌, HTTP 오류도 `None`과 `DISNEY_PUBLIC reason=UNAVAILABLE_OR_INCOMPLETE` 로그로 안전하게 실패한다.
+  일반/테스트 명령은 `ret=fail`로 반환하며 저장하지 않는다. 진단에 raw 응답/예외 내용을 넣지 않는다.
+- entity 경로는 공개 builder만 사용하며 실패하면 legacy로 재시도하지 않는다. 기존 `/series/.../<code>`
+  및 비-entity legacy 코드는 기존 resolver/provider 경로를 유지한다. 검색 URL 추출에도 entity를 추가하되
+  다른 provider 우선순위는 바꾸지 않는다. 일반 제목 검색 결과 확보 자체는 기존 OTTCODE에 의존한다.
+- 요청은 HTML 1회, 연결/읽기 timeout 5초/15초, redirect/재시도/로그인/주기적 polling 없음.
+  파싱 입력은 5백만 문자 이하로 제한한다(네트워크 streaming 크기 제한은 아님).
+
+실제 한국어 페이지를 새 parser로 확인한 결과: 시즌 1=6회차, 시즌 2=2회차, 썸네일 URL 8개,
+방영일 0개. 이 한 작품의 관찰과 합성 fixture 검증은 live FlaskFarm/모든 Disney 작품의 성공을 뜻하지 않는다.
 
 ###### **<쿠팡플레이 공개 provider (1.0.34)>**
 
