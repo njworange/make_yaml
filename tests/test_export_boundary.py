@@ -42,6 +42,8 @@ def load_module(name, path):
 
 titles = load_module(PACKAGE + '.services.episode_title', ROOT / 'services/episode_title.py')
 normalizer = load_module(PACKAGE + '.services.export_normalizer', ROOT / 'services/export_normalizer.py')
+coupang = load_module(PACKAGE + '.services.coupang_provider', ROOT / 'services/coupang_provider.py')
+codes = load_module(PACKAGE + '.services.code_service', ROOT / 'services/code_service.py')
 tving_dates = load_module(PACKAGE + '.services.tving_date_enrichment', ROOT / 'services/tving_date_enrichment.py')
 writer = load_module(PACKAGE + '.services.yaml_service', ROOT / 'services/yaml_service.py')
 
@@ -63,6 +65,7 @@ def provider_namespace():
         'copy': copy, 're': re, 'html': html, 'datetime': datetime,
         'strip_broadcast_prefix': titles.strip_broadcast_prefix,
         'enrich_tving_dates': lambda code, value: value,
+        'extract_coupang_title_code': coupang.extract_coupang_title_code,
         'format_korean_broadcast_date': titles.format_korean_broadcast_date,
         'KOREAN_WEEKDAYS': list('월화수목금토일'), 'logger': Mock(),
         'traceback': SimpleNamespace(format_exc=lambda: 'stub traceback'),
@@ -324,7 +327,7 @@ class ProviderBoundaryTests(unittest.TestCase):
                         self.assertEqual(result['code'], prefix + '12345678')
 
     def test_unrelated_legacy_identity_and_split_mapping(self):
-        for site in ['KW', 'KV', 'FD', 'KC']:
+        for site in ['KW', 'KV', 'FD']:
             env = provider_namespace()
             env['P'].ModelSetting.get_int = lambda key: 2
             original = {'code': 'existing-code', 'seasons': [{'index': 1, 'episodes': [{'index': 7, 'title': '회차'}]}]}
@@ -876,6 +879,246 @@ class TvingDiagnosticTests(unittest.TestCase):
             self.assertIs(tving_dates.enrich_tving_dates('P001', show), show)
         log = json.loads(self.logger.info.call_args.args[0].split(' ', 1)[1])
         self.assertEqual((log['reason'], log['stage'], log['applied']), ('ENRICHMENT_ERROR', 'COPY_APPLY', 0))
+
+
+class CoupangProviderTests(unittest.TestCase):
+    CID = 'ba31709a-556c-4130-bb40-e7308dc24c17'
+
+    def detail(self, count=1, kind='TVSHOW'):
+        return {'id': self.CID, 'as': kind, 'title': '작품 제목',
+                'description': '작품 설명', 'seasons': count,
+                'images': {'poster': {'url': 'https://example.invalid/poster.jpg'}},
+                'published_at': '2020-01-01T00:00:00Z'}
+
+    def row(self, season=1, index=7):
+        return {'id': f'00000000-0000-0000-{season:04x}-{index:012x}',
+                'parent_id': self.CID, 'season': season, 'episode': index,
+                'title': f'{index}회', 'description': '회차 설명',
+                'published_at': '2026-09-12T23:30:00.000Z',
+                'images': {'story-art': {'url': 'https://example.invalid/episode.jpg'}}}
+
+    def response(self, data=None, status=200, error=None):
+        payload = {'data': data} if error is None else {'error': error}
+        return Mock(status_code=status, json=Mock(return_value=payload))
+
+    def terminal(self):
+        return self.response(status=400, error={'name': 'SeasonNotFound', 'code': 'DI-7011'})
+
+    def run_builder(self, responses):
+        get = Mock(side_effect=responses)
+        return coupang.build_coupang_show_data(self.CID, http_get=get), get
+
+    def test_single_season_preserves_numbers_text_dates_and_input(self):
+        detail, rows = self.detail(), [self.row(index=9), self.row(index=7)]
+        before = copy.deepcopy((detail, rows))
+        responses = [self.response(detail), self.response(rows), self.terminal()]
+        show, get = self.run_builder(responses)
+        self.assertEqual((detail, rows), before)
+        self.assertEqual(show['code'], 'KC' + self.CID)
+        self.assertFalse(show['primary'])
+        self.assertEqual(show['summary'], '작품 설명')
+        self.assertEqual(show['posters'], [{'url': 'https://example.invalid/poster.jpg'}])
+        episodes = show['seasons'][0]['episodes']
+        self.assertEqual([ep['index'] for ep in episodes], [7, 9])
+        self.assertEqual(episodes[0]['title'], '7회')
+        self.assertEqual(episodes[0]['originally_available_at'], '2026-09-12')
+        self.assertEqual(episodes[0]['thumbs'], 'https://example.invalid/episode.jpg')
+        exported = normalizer.normalize_export_data(show)
+        self.assertEqual(exported['seasons'][0]['episodes'][0]['title'], '2026.9.12(토) 7회')
+        self.assertEqual(normalizer.normalize_export_data(exported), exported)
+        self.assertEqual(get.call_count, 3)
+        for call in get.call_args_list:
+            self.assertEqual(call.kwargs['timeout'], (5, 15))
+            self.assertFalse(call.kwargs['allow_redirects'])
+            self.assertEqual(set(call.kwargs['headers']), {'Accept', 'User-Agent'})
+        for response in responses:
+            response.close.assert_called_once()
+
+    def test_three_seasons_descending_api_order_and_terminal_empty(self):
+        detail = self.detail(3)
+        detail['seasonList'] = [3, 2, 1]
+        show, get = self.run_builder([self.response(detail)] + [
+            self.response([self.row(season, 8), self.row(season, 2)])
+            for season in (1, 2, 3)] + [self.response([])])
+        self.assertEqual([s['index'] for s in show['seasons']], [1, 2, 3])
+        self.assertEqual([[ep['index'] for ep in s['episodes']] for s in show['seasons']], [[2, 8]] * 3)
+        self.assertEqual([c.args[0].split('?')[-1] for c in get.call_args_list[1:]],
+                         ['season=1', 'season=2', 'season=3', 'season=4'])
+
+    def test_movie_uses_detail_only(self):
+        detail = self.detail(None, 'MOVIE')
+        show, get = self.run_builder([self.response(detail)])
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(show['seasons'], [{'index': 1, 'episodes': [{
+            'index': 1, 'title': '작품 제목', 'summary': '작품 설명',
+            'originally_available_at': '2020-01-01'}]}])
+        normalizer.normalize_export_data(show)
+
+    def test_missing_optional_metadata_not_fabricated(self):
+        row = self.row(index=0)
+        for key in ('published_at', 'images', 'title', 'description'):
+            row.pop(key)
+        detail = self.detail()
+        detail.pop('images')
+        show, _ = self.run_builder([self.response(detail), self.response([row]), self.terminal()])
+        self.assertNotIn('posters', show)
+        self.assertEqual(show['seasons'][0]['episodes'], [{'index': 0, 'title': '', 'summary': ''}])
+
+    def test_api_errors_do_not_look_like_end_of_seasons(self):
+        for name, code in [('TitleNotFound', 'DI-7010'), ('TitleNotTVShow', 'DI-7050'),
+                           ('SeasonNotFound', 'DI-7011'), ('Unknown', 'unknown')]:
+            error = {'name': name, 'code': code}
+            with self.subTest(name=name):
+                for prefix in ([], [self.response(self.detail())]):
+                    show, get = self.run_builder(prefix + [self.response(status=400, error=error)])
+                    self.assertIsNone(show)
+                    self.assertEqual(get.call_count, len(prefix) + 1)
+                if name != 'SeasonNotFound':
+                    show, _ = self.run_builder([self.response(self.detail()), self.response([self.row()]),
+                                                self.response(status=400, error=error)])
+                    self.assertIsNone(show)
+
+    def test_network_http_and_json_failures_stop_without_retries(self):
+        failures = [RuntimeError('synthetic-private-token'),
+                    Mock(status_code=200, json=Mock(side_effect=ValueError('synthetic-private-token')))]
+        failures += [self.response(status=status) for status in (301, 401, 403, 429, 500)]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                setup.P.logger.reset_mock()
+                show, get = self.run_builder([failure])
+                self.assertIsNone(show)
+                self.assertEqual(get.call_count, 1)
+                self.assertNotIn('synthetic-private-token', str(setup.P.logger.mock_calls))
+
+    def test_malformed_detail_and_season_declarations_fail_early(self):
+        bad_details = [None, [], {}, {**self.detail(), 'id': 'other'},
+                       {**self.detail(), 'title': ''}, {**self.detail(), 'as': 'LIVE'}]
+        bad_details += [{**self.detail(), 'seasons': n} for n in (None, 0, -1, True, '3', 31)]
+        bad_details += [{**self.detail(3), 'seasonList': s} for s in ([1, 2], [1, 1, 3], [1, 2, True], [1, 2, 4], {})]
+        for detail in bad_details:
+            with self.subTest(detail=detail):
+                show, get = self.run_builder([self.response(detail)])
+                self.assertIsNone(show)
+                self.assertEqual(get.call_count, 1)
+
+    def test_malformed_episodes_fail_without_partial_output(self):
+        row = self.row()
+        bad_rows = [None, {}, [], [None], [row, copy.deepcopy(row)],
+                    [row, {**self.row(index=8), 'id': row['id']}]]
+        for changes in ({'season': 2}, {'season': True}, {'episode': True}, {'episode': -1},
+                        {'episode': '7'}, {'id': ''}, {'parent_id': 'other'},
+                        {'published_at': '2026-02-30T00:00:00Z'}, {'title': {}},
+                        {'images': []}, {'images': {'story-art': {'url': 'javascript:bad'}}}):
+            bad_rows.append([{**row, **changes}])
+        for rows in bad_rows:
+            with self.subTest(rows=rows):
+                show, get = self.run_builder([self.response(self.detail()), self.response(rows)])
+                self.assertIsNone(show)
+                self.assertEqual(get.call_count, 2)
+
+    def test_second_season_failure_and_count_mismatch_discard_all(self):
+        show, get = self.run_builder([self.response(self.detail(2)), self.response([self.row()]), self.terminal()])
+        self.assertIsNone(show)
+        self.assertEqual(get.call_count, 3)
+        for extra in (None, {}, [self.row(2)]):
+            show, _ = self.run_builder([self.response(self.detail()), self.response([self.row()]), self.response(extra)])
+            self.assertIsNone(show)
+
+    def test_uuid_url_inputs_and_host_validation(self):
+        for path in ('content/', 'en/content/', 'ko-kr/content/', 'titles/', 'en/titles/'):
+            for suffix in ('', '/', '?a=1', '/?a=1#x', '#fragment'):
+                url = 'https://www.coupangplay.com/' + path + self.CID + suffix
+                self.assertEqual(coupang.extract_coupang_title_code(url), self.CID)
+                self.assertEqual(codes.sort_code(['COUPANG'], [url]), 'KC' + self.CID)
+        self.assertEqual(coupang.extract_coupang_title_code('KC' + self.CID.upper()), self.CID)
+        self.assertEqual(coupang.extract_coupang_title_code('KChttps://www.coupangplay.com/content/' + self.CID), self.CID)
+        for bad in ('', '../a', 'not-uuid', 'https://evil.invalid/content/' + self.CID,
+                    'https://evil.invalid/?next=https://www.coupangplay.com/content/' + self.CID,
+                    'https://www.coupangplay.com.evil.invalid/content/' + self.CID,
+                    'https://www.coupangplay.com/content/' + self.CID + '/extra'):
+            get = Mock()
+            self.assertIsNone(coupang.build_coupang_show_data(bad, http_get=get))
+            get.assert_not_called()
+            self.assertIsNone(codes.sort_code(['COUPANG'], [bad]))
+
+    def test_public_dispatch_works_without_legacy_and_never_falls_back(self):
+        for legacy in (None, Mock()):
+            for result in (None, '', [], {'primary': False, 'code': 'KC' + self.CID, 'title': '작품', 'seasons': []}):
+                env = provider_namespace()
+                env['get_provider_class'] = lambda site: legacy
+                env['build_coupang_show_data'] = Mock(return_value=result)
+                self.assertEqual(env['get_show_data']('KChttps://www.coupangplay.com/content/' + self.CID), result)
+                env['build_coupang_show_data'].assert_called_once_with(self.CID)
+                if legacy is not None:
+                    legacy.make_data.assert_not_called()
+
+    def test_coupang_split_season_preserves_existing_setting(self):
+        env = provider_namespace()
+        env['get_provider_class'] = lambda site: None
+        env['P'].ModelSetting.get_int = lambda key: 2
+        original = {'code': 'KC' + self.CID, 'seasons': [{'index': 3, 'episodes': [{'index': 7}]}]}
+        before = copy.deepcopy(original)
+        env['build_coupang_show_data'] = Mock(return_value=original)
+        result = env['get_show_data']('KC' + self.CID)
+        self.assertEqual([s['index'] for s in result['seasons']], [3, 103])
+        self.assertEqual(original, before)
+
+    def test_registry_enables_command_and_respects_search_order(self):
+        tree = ast.parse((ROOT / 'providers/legacy_registry.py').read_text())
+        functions = {'get_direct_command_prefix', 'is_provider_enabled', 'is_command_enabled', 'filter_enabled_user_order'}
+        assignments = {'DIRECT_COMMAND_PREFIX_MAP', 'PROVIDER_METADATA'}
+        nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in functions)
+                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in assignments for t in n.targets))]
+        env = {}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), '<registry fixture>', 'exec'), env)
+        self.assertTrue(env['is_command_enabled']('cpang_code'))
+        self.assertEqual(env['filter_enabled_user_order'](['TVING', 'COUPANG', 'NF']), ['TVING', 'COUPANG', 'NF'])
+        self.assertEqual(env['filter_enabled_user_order'](['TVING']), ['TVING'])
+        urls = ['https://www.coupangplay.com/content/' + self.CID, 'https://www.netflix.com/title/123']
+        self.assertEqual(codes.sort_code(['NF', 'COUPANG'], urls), 'FN123')
+        self.assertEqual(codes.sort_code(['COUPANG', 'NF'], urls), 'KC' + self.CID)
+
+    def test_logging_failure_does_not_break_success(self):
+        with patch.object(setup.P.logger, 'info', side_effect=RuntimeError('offline')):
+            show, _ = self.run_builder([self.response(self.detail(None, 'MOVIE'))])
+        self.assertIsNotNone(show)
+
+    def test_command_reports_failure_in_test_and_export_modes(self):
+        path = ROOT / 'mod_main.py'
+        cls = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef))
+        command = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'process_command')
+        for mode in ('test', ''):
+            for data in (None, [], ''):
+                utils = SimpleNamespace(get_data=Mock(return_value=data), make_yaml=Mock())
+                env = {'jsonify': lambda payload: payload, 'logger': Mock(),
+                       'is_command_enabled': lambda command: True,
+                       'build_direct_code': lambda command, code: 'KC' + code,
+                       'has_show_data': lambda value: value not in (None, [], ''), 'YAMLUTILS': utils}
+                exec(compile(ast.Module(body=[command], type_ignores=[]), str(path), 'exec'), env)
+                result = env['process_command'](SimpleNamespace(), 'cpang_code', self.CID, mode, '', None)
+                self.assertEqual(result['ret'], 'fail')
+                self.assertIn('COUPANG_PUBLIC', result['msg'])
+                utils.get_data.assert_called_once_with('KC' + self.CID)
+                utils.make_yaml.assert_not_called()
+
+    def test_missing_envelope_and_cross_season_duplicate_are_rejected(self):
+        for payload in ([], None, {}, {'error': {}, 'data': self.detail()}):
+            response = Mock(status_code=200, json=Mock(return_value=payload))
+            show, _ = self.run_builder([response])
+            self.assertIsNone(show)
+        row = self.row()
+        show, _ = self.run_builder([self.response(self.detail(2)), self.response([row]),
+                                    self.response([{**self.row(2), 'id': row['id']}])])
+        self.assertIsNone(show)
+
+    def test_exact_season_cap_allows_only_one_terminal_probe(self):
+        with patch.object(coupang, 'MAX_SEASONS', 1):
+            show, get = self.run_builder([self.response(self.detail()), self.response([self.row()]), self.terminal()])
+            self.assertIsNotNone(show)
+            self.assertEqual(get.call_count, 3)
+            show, get = self.run_builder([self.response(self.detail(2))])
+            self.assertIsNone(show)
+            self.assertEqual(get.call_count, 1)
 
 
 if __name__ == '__main__':

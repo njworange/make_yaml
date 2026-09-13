@@ -2,13 +2,14 @@ import re
 import traceback
 
 from ..setup import P
+from .coupang_provider import COUPANG_URL_PATTERN
 
 logger = P.logger
 
 REGEX_BY_PROVIDER_KEY = {
     'wavve': r'wavve\.com\/player\/(vod\?contentid=|vod\?programid=.*?)(?P<code>[^#][A-Za-z0-9]+_[A-Za-z0-9]+)',
     'tving': r'tving\.(com\/contents)\/(?P<code>[^#].*?)$',
-    'coupang': r'coupangplay\.com\/titles\/(?P<code>[^/]+)$',
+    'coupang': COUPANG_URL_PATTERN,
     'nf': r'netflix\.com\/(?:(?:[a-z]{2}(?:-[a-z]{2})?)\/)?title\/(?P<code>[^/#?]+)',
     'dsnp': r'disneyplus\.com(\/ko-kr)?\/series\/.*?\/(?P<code>[^?=&]+)',
     'atvp': r'apple.com/.*?(?P<code>umc.cmc.[a-zA-Z0-9]+)$',

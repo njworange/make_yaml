@@ -75,7 +75,7 @@ EBSKIDS https://anikids.ebs.co.kr/anikids/program/show/10024440 에서 ***100244
 - EBSKIDS: public parser 기반 episode parser 가능
 - 넷플릭스: public parser 기반 episode parser 가능
 - 디즈니플러스: public parser 기준 show-level 메타데이터까지만 확인, episode-level parser 는 아직 보류
-- 쿠팡플레이: 미해결
+- 쿠팡플레이: 비로그인 공개 metadata API 기반 시즌/회차 parser (1.0.34부터)
 
 
 ######**<OTT별 메모>**
@@ -86,7 +86,58 @@ EBSKIDS https://anikids.ebs.co.kr/anikids/program/show/10024440 에서 ***100244
 - EBSKIDS: 공개 program page와 episode detail page JSON-LD 를 사용한다. episode summary 와 날짜 prefix title 이 반영되어 있다.
 - 넷플릭스: public title page 기반 parser 가 추가되어 episode title, summary, 썸네일 추출이 가능하다. 다만 현재 공개 페이지 기준으로 episode 날짜 정보는 확인하지 못했다.
 - 디즈니플러스: public parser 기준으로 entity page 의 title, summary, image, year, cast 같은 show-level 메타데이터는 공개되어 있으나, episode/season payload 는 아직 확보하지 못했다. legacy provider 경로는 별도로 남아 있다.
-- 쿠팡플레이: 아직 안정적인 public parser 경로를 찾지 못했다.
+- 쿠팡플레이: 공개 작품/시즌별 회차 API 사용. 실패 시 미검증 legacy provider로 fallback하지 않는다.
+
+###### **<쿠팡플레이 공개 provider (1.0.34)>**
+
+쿠팡 코드 입력에 작품 UUID 또는 `https://www.coupangplay.com/content/<uuid>` URL을 넣는다.
+`/en/content/<uuid>` 및 기존 `/titles/<uuid>`도 지원한다. URL의 query/fragment와 마지막 `/`는
+작품 ID에서 제외한다. 다른 호스트나 잘못된 UUID는 요청하지 않는다. 작품 코드는 `KC<uuid>`다.
+
+- `discover.coupangstreaming.com/v1/discover/titles/{id}`와
+  `.../{id}/episodes?season={n}`를 사용한다. 이 adapter는 로그인·계정·쿠키·토큰을 직접 다루지 않는다.
+  공개 응답은 서비스가 보장한 외부 개발자 API 계약이 아니며 지역/정책/응답 구조 변화로 실패할 수 있다.
+- 작품 `title`, `description` 및 `images.poster.url` (없으면 `story-art.url`)을 사용한다.
+  포스터는 `[{url: ...}]`, 회차 썸네일은 해당 회차 `images.story-art.url` 문자열이다.
+  작품 포스터를 회차 썸네일로 복제하지 않는다. 별도의 시즌 포스터/제목은 만들어내지 않는다.
+- TVSHOW는 정수 `seasons`가 1~30일 때만 수집한다. `seasonList`가 있으면 중복 없이 1~N인지
+  교차 검증한다. 각 시즌의 응답 `season`/`episode` 및 제공된 `parent_id`를 검증하며 중복 회차 번호,
+  중복 회차 ID, 빈 시즌, 시즌 불일치는 부분 결과까지 폐기한다. 특별 시즌/불연속 시즌은 추정하지 않는다.
+  회차 번호는 원본 그대로 사용하고(0 허용), API의 역순 응답은 번호 오름차순으로 정렬한다.
+- 마지막에 N+1 시즌을 한 번 확인한다. 구조화된 `SeasonNotFound / DI-7011`(HTTP 400) 또는
+  HTTP 200의 빈 배열만 종료로 인정한다. 임의 HTTP 400이나 다른 오류를 정상 종료로 취급하지 않는다.
+  상한 도달·선언 개수 불일치·미지원 구조에서는 안전하게 실패한다. 별도의 회차 pagination 계약은
+  확인되지 않았으므로, 이 검증이 서비스의 전체 과거 회차 제공을 보장하지는 않는다.
+- 회차 `title`은 원본 그대로 수집한다(`1회` 등). 최종 YAML에서만 기존 공통 날짜 제목 규칙을 적용한다.
+  날짜는 **해당 회차 `published_at`의 달력 날짜**를 기존 `normalize_date`로 검증해 사용한다.
+  이것은 쿠팡의 publication 값이지 모든 작품의 최초 TV 방영일과 동일함을 보장하는 값은 아니다.
+  기존 정규화 정책대로 timezone 변환 없이 원래 날짜 부분을 사용한다. 작품 최초일/썸네일 날짜를
+  회차에 복제하지 않는다. 결측은 생략하고 잘못된 비어 있지 않은 날짜는 전체 조회 실패로 처리한다.
+- 영화(`MOVIE`)는 회차 API를 호출하지 않고 상세 조회 한 번만 사용한다. 기존 YAML 소비 경로와의
+  호환을 위해 **합성 시즌 1/회차 1**로 영화 제목·설명을 담는다. 실제 API 회차 번호가 있다는 뜻은 아니다.
+  영화의 `published_at` 역시 쿠팡 publication 값이며 최초 극장 개봉일을 추정하지 않는다.
+  영화 정보가 없어도 TVSHOW 지원과 무관하며 다른 타입은 미지원으로 반환한다.
+- 요청별 연결/읽기 timeout은 5초/15초, 재시도·redirect 추적·주기적 polling은 없다.
+  TVSHOW는 상세 1회 + N개 시즌 + 종료 확인 1회(최대 32회), 영화는 1회다.
+  timeout은 전체 작업의 절대 wall-clock 제한이 아니므로 느린 응답은 추가 시간이 걸릴 수 있다.
+  사용자 요청에 따라 실행되지만 기존 자동 처리 경로에서도 선택될 수 있다. 대량/동시 요청은 피한다.
+- `COUPANG`을 기존 사용자 검색 우선순위에 적힌 위치 그대로 다시 포함한다. 다른 provider의 순서는
+  바꾸지 않으며 제외를 원하면 우선순위에서 빼면 된다. 제목 검색 자체는 기존 OTTCODE에 의존하며
+  새 쿠팡 검색 API를 구현한 것은 아니다. 검색된 쿠팡 작품 실패 시 다음 provider를 새로 검색하는
+  기능도 추가하지 않는다. 우선 작품 URL/UUID 직접 조회로 확인하는 것이 좋다.
+- `enabled=True`로 기존 공통 명령 gate를 통과한다. 다른 provider용 gate는 제거하지 않는다.
+  공개 builder가 실패하면 `None`과 안전한 `COUPANG_PUBLIC reason=...` 로그를 남긴다.
+  쿠팡 테스트/일반 생성 명령은 `ret=fail`을 반환하고 저장하지 않는다. 원문 응답/예외 텍스트를
+  로그에 넣지 않는다. 미검증 `site_coupang.pyf`의 `make_data`로 재시도하지 않는다.
+
+정책 참고: [웹 robots.txt](https://www.coupangplay.com/robots.txt)의 `/api` 금지는
+`www.coupangplay.com` 경로 규칙이며 별도 API 호스트의 허가/금지를 대신 증명하지 않는다.
+robots.txt 부재나 적은 요청 횟수도 자동수집 허용 또는 차단 없음의 보장은 아니다.
+401/403/429 등에서 즉시 실패하고 우회하거나 반복 재시도하지 않는다.
+
+검증 한계: 합성 fixture 검증과 소수 공개 응답 구조 확인은 실제 FlaskFarm 실행, 모든 작품의
+회차 완전성·publication 의미·한국어 가용성 또는 앞으로의 차단 여부를 보장하지 않는다.
+기존 한국어 gate, `delete_title`, TMDB 보강, `split_season` 설정은 그대로 적용된다.
 
 
 ######**<날짜 prefix 정책>**
@@ -220,6 +271,7 @@ python3 -B -m unittest discover -s tests -v
 ```
 
 `tests/test_export_boundary.py`는 합성 fixture로 정규화, 제목 삭제 설정, 코드 주입, 티빙 날짜 처리와 기존 fallback 순서를 검사한다.
+쿠팡 builder는 네트워크 함수를 주입해 단일/다중 시즌, 영화, 오류·종료조건·번호·날짜·URL 및 dispatch를 검증한다.
 회차 제목의 날짜/제목 결측 조합, 재정규화, 한국어 판정, 생성 명령의 validation 실패 응답도 격리 검증한다.
 Writer는 setup stub으로 import하고 provider 함수는 실제 소스 AST에서 격리해 실행한다.
 실제 OTT 응답, 계정, `.pyf`, FlaskFarm 또는 외부 YAML 소비자의 통합 검증을 대체하지 않는다.

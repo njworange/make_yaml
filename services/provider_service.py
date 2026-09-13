@@ -13,6 +13,7 @@ from ..providers.legacy_registry import get_provider_class
 from ..setup import P
 from .episode_title import KOREAN_WEEKDAYS, format_korean_broadcast_date, strip_broadcast_prefix
 from .tving_date_enrichment import enrich_tving_dates
+from .coupang_provider import build_coupang_show_data, extract_coupang_title_code
 
 logger = P.logger
 
@@ -1480,12 +1481,16 @@ def get_show_data(code):
             site_code = extract_prime_detail_code(site_code)
         elif site == 'FN':
             site_code = extract_netflix_title_code(site_code)
+        elif site == 'KC':
+            site_code = extract_coupang_title_code(site_code)
         logger.debug(f"YAMLUTILS get_data parsed site={site} code={site_code}")
         provider_class = get_provider_class(site)
-        if provider_class is None and site not in ['KE', 'FA', 'FP', 'FN']:
+        if provider_class is None and site not in ['KE', 'FA', 'FP', 'FN', 'KC']:
             return None
         show_data = None
-        if site == 'KE':
+        if site == 'KC':
+            show_data = build_coupang_show_data(site_code)
+        elif site == 'KE':
             try:
                 show_data = build_ebs_show_data(site_code)
             except Exception as e:
@@ -1516,7 +1521,7 @@ def get_show_data(code):
                 logger.debug(f"Prime public parse empty; falling back to legacy site={site} code={site_code}")
             elif site == 'FN':
                 logger.debug(f"Netflix public parse empty; falling back to legacy site={site} code={site_code}")
-            if site != 'FA' and provider_class is not None:
+            if site not in ('FA', 'KC') and provider_class is not None:
                 show_data = provider_class.make_data(site_code)
         if site == 'KV':
             show_data = normalize_tving_show_data(show_data)
