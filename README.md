@@ -216,6 +216,42 @@ Wavve/Tving/Prime/AppleTV/EBS의 중간 provider 데이터에서는 날짜 장�
 썸네일 URL의 `/YYYYMMDD/`는 방영일 근거가 아니므로 더 이상 날짜 fallback으로 사용하지 않는다.
 이 변경은 기존에 저장된 YAML이나 레거시 provider가 이미 반환한 날짜의 출처를 소급 교정하지 않는다.
 
+###### **<티빙 E코드 입력 및 TMDB 값 보존 (1.0.36)>**
+
+티빙 회차 코드(`E...`) 직접 입력도 날짜 보강 전 부모 프로그램 코드(`P...`)로 연결한다.
+기존 legacy metadata 조회에는 원래 E코드를 그대로 전달하여 회차 선택/수집 동작을 바꾸지 않는다.
+그 뒤 `https://www.tving.com/contents/{E코드}` 공개 HTML을 한 번 읽어 `__NEXT_DATA__`의
+`props.pageProps.contentInfo.code`가 요청한 E코드인지, `program_code`가 P코드인지 확인한다.
+별도로 `pageProps.programCode`가 있다면 두 프로그램 ID도 일치해야 한다.
+
+- 기존 show.code가 요청 E코드(또는 그 KV 접두어형), 확인된 P코드, 빈 값/누락인 경우에만
+  복사본의 show.code를 `KV+P코드`로 정규화한다. E코드를 그대로 남기면 기존 program-match guard가
+  올바르게 변환된 P코드마저 거부하므로 이 연결도 함께 필요하다. 다른 프로그램/회차 코드는 덮어쓰지 않는다.
+- 기존 `enrich_tving_dates`에는 확인된 P코드와 복사본을 전달한다. 기존 제목/요약/회차 구조/유효한 날짜,
+  code-first 매칭, season1-only frequency fallback, 페이지 상한은 그대로 유지한다.
+- 공개 조회 실패·잘못된 HTML/JSON·응답 identity 불일치·로컬 코드 충돌이면 **추가 날짜 보강만 생략**하고
+  기존 metadata로 진행한다. 코드 충돌을 임의로 교정하거나 E코드로 프로그램 API를 다시 요청하지 않는다.
+- P코드 입력은 추가 공개 HTTP 요청 없이 기존 경로 그대로다. E 조회는 연결/읽기 timeout 5초/15초,
+  redirect/재시도/polling 없음, 최소 User-Agent만 사용한다. 로그인 정보·세션·쿠키를 직접 읽거나 저장하지 않는다.
+  파싱 HTML은 5백만 문자 이하로 제한한다(네트워크 streaming/전체 wall-clock 제한은 아님).
+- 로그는 `TVING_INPUT_DIAG reason=EPISODE_RESOLVED`, `EPISODE_RESOLUTION_FAILED`,
+  `LOCAL_PROGRAM_CONFLICT` 중 하나다. raw HTML/응답/예외 텍스트는 출력하지 않는다.
+  E 변환 실패로 보강을 건너뛰면 그 호출에는 `TVING_DATE_DIAG`가 없을 수 있으므로 두 로그를 함께 본다.
+- 공개 페이지의 `episode_broad_dt` 직접 주입은 이번에는 추가하지 않는다. 페이지에는 진입 회차 하나만
+  있으며, legacy 결과의 여러 회차에 이를 복제하면 안 된다. 특히 회차 code가 없는 결과의 별도 매칭을
+  안전하게 설계하기 전에는 기존 support_site 회차별 날짜 경로를 유지한다.
+
+TMDB 보강의 episode 날짜/썸네일은 새 값이 기존 공통 `normalize_date` / `normalize_thumb`로
+정규화되고 비어 있지 않은 경우에만 기존 값을 갱신한다. 필드 조회 예외, `None`, 빈 값 또는 지원하지 않는
+형식이면 원래 episode 값을 보존한다. 원래 키도 없었다면 빈 값을 유지하며 최종 export에서 생략한다.
+유효한 새 TMDB 값이 있으면 기존 TMDB 우선 정책은 유지한다. 날짜와 썸네일의 성공/실패는 독립적으로 처리한다.
+썸네일 검증은 데이터 형식 검사이며 이미지 URL의 실제 접속 성공을 보장하지 않는다.
+이 변경은 episode 두 필드만 대상으로 하며, TMDB 작품/시즌 전체 조회 실패 처리, 다른 metadata 필드,
+기존 in-place merge 계약은 변경하지 않는다. 이미 저장된 YAML을 소급 수정하지도 않는다.
+
+검증은 stub API/합성 fixture 기준이다. 실제 사용자 환경에서 E→P 변환 이후 해당 작품의
+support_site 프로그램/회차 API가 정상 응답하는지는 새 로그로 별도 확인해야 한다.
+
 ###### **<티빙 실제 회차 방영일 보강>**
 
 티빙 legacy 조회/기존 제목 정리 후, 날짜가 비어 있는 회차만 `support_site.SupportTving`의

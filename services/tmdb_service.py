@@ -1,3 +1,6 @@
+from .export_normalizer import normalize_date, normalize_thumb
+
+
 def apply_tmdb_data(tmdb_code, show_data):
     from metadata.mod_ftv import ModuleFtv
 
@@ -40,13 +43,21 @@ def apply_tmdb_data(tmdb_code, show_data):
         season['summary'] = season_info['plot']
         for episode in season['episodes']:
             try:
-                episode['originally_available_at'] = season_info['episodes'][episode['index']]['premiered']
+                day = normalize_date(season_info['episodes'][episode['index']]['premiered'])
             except Exception:
-                episode['originally_available_at'] = ''
+                day = None
+            if day:
+                episode['originally_available_at'] = day
+            else:
+                episode.setdefault('originally_available_at', '')
             try:
-                episode['thumbs'] = season_info['episodes'][episode['index']]['art'][0]
+                thumb = normalize_thumb(season_info['episodes'][episode['index']]['art'][0])
             except Exception:
-                episode['thumbs'] = ''
+                thumb = None
+            if thumb:
+                episode['thumbs'] = thumb
+            else:
+                episode.setdefault('thumbs', '')
             try:
                 episode['writers'] = str(season_info['episodes'][episode['index']]['writer'])[1:-1].replace("'", '').strip()
             except Exception:

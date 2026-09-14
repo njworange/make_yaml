@@ -46,6 +46,8 @@ coupang = load_module(PACKAGE + '.services.coupang_provider', ROOT / 'services/c
 disney = load_module(PACKAGE + '.services.disney_provider', ROOT / 'services/disney_provider.py')
 codes = load_module(PACKAGE + '.services.code_service', ROOT / 'services/code_service.py')
 tving_dates = load_module(PACKAGE + '.services.tving_date_enrichment', ROOT / 'services/tving_date_enrichment.py')
+tving_input = load_module(PACKAGE + '.services.tving_input', ROOT / 'services/tving_input.py')
+tmdb = load_module(PACKAGE + '.services.tmdb_service', ROOT / 'services/tmdb_service.py')
 writer = load_module(PACKAGE + '.services.yaml_service', ROOT / 'services/yaml_service.py')
 
 
@@ -70,6 +72,7 @@ def provider_namespace():
         'copy': copy, 're': re, 'html': html, 'datetime': datetime,
         'strip_broadcast_prefix': titles.strip_broadcast_prefix,
         'enrich_tving_dates': lambda code, value: value,
+        'resolve_tving_enrichment_input': lambda code, value: (code, value),
         'extract_coupang_title_code': coupang.extract_coupang_title_code,
         'uses_disney_public_route': disney.uses_disney_public_route,
         'format_korean_broadcast_date': titles.format_korean_broadcast_date,
@@ -1353,6 +1356,186 @@ class DisneyPublicTests(unittest.TestCase):
             result = env['process_command'](SimpleNamespace(), 'dsnp_code', self.ID, mode, '', None)
             self.assertEqual(result['ret'], 'fail')
         utils.make_yaml.assert_not_called()
+
+
+class TvingEpisodeInputTests(unittest.TestCase):
+    E = 'E004572986'
+    P = 'P001787959'
+
+    def show(self, code=None):
+        return {'code': code if code is not None else 'KV' + self.E, 'title': '아이돌 파견근무',
+                'seasons': [{'index': 1, 'episodes': [{'index': 1, 'title': '아이돌 파견근무 1화',
+                                                      'originally_available_at': ''}]}]}
+
+    def payload(self):
+        return {'props': {'pageProps': {'programCode': self.P, 'contentInfo': {
+            'code': self.E, 'program_code': self.P, 'episode_broad_dt': '20260610', 'frequency': 1}}}}
+
+    def response(self, payload=None):
+        return Mock(status_code=200, text='<script id="__NEXT_DATA__" type="application/json">'
+                    + json.dumps(self.payload() if payload is None else payload) + '</script>')
+
+    def test_resolution_rebinds_only_verified_input_without_mutation(self):
+        for code in ('KV' + self.E, self.E, 'KV' + self.P, self.P, ''):
+            original = self.show(code); before = copy.deepcopy(original)
+            get = Mock(return_value=self.response())
+            program, show = tving_input.resolve_tving_enrichment_input(self.E, original, get)
+            self.assertEqual(program, self.P)
+            self.assertEqual(show['code'], 'KV' + self.P)
+            self.assertEqual(show['seasons'], original['seasons'])
+            self.assertEqual(original, before)
+            self.assertIsNot(show, original)
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(get.call_args.kwargs['timeout'], (5, 15))
+            self.assertFalse(get.call_args.kwargs['allow_redirects'])
+            self.assertEqual(set(get.call_args.kwargs['headers']), {'User-Agent'})
+            get.return_value.close.assert_called_once()
+
+    def test_program_input_makes_no_public_request(self):
+        show = self.show('KV' + self.P); get = Mock()
+        program, result = tving_input.resolve_tving_enrichment_input(self.P, show, get)
+        self.assertEqual(program, self.P)
+        self.assertIs(result, show)
+        get.assert_not_called()
+
+    def test_invalid_input_and_local_conflict_preserve_original(self):
+        show = self.show(); get = Mock()
+        self.assertEqual(tving_input.resolve_tving_enrichment_input('E../../bad', show, get), (None, show))
+        get.assert_not_called()
+        for code in ('KVP999', 'KVE999', 123):
+            original = self.show(code)
+            program, result = tving_input.resolve_tving_enrichment_input(self.E, original, Mock(return_value=self.response()))
+            self.assertIsNone(program)
+            self.assertIs(result, original)
+
+    def test_malformed_identity_and_pages_fail_closed(self):
+        payloads = [{}, {'props': None}]
+        for field, value in [('code', 'E999'), ('program_code', None), ('program_code', 'E123'),
+                             ('program_code', 'P123/evil')]:
+            data = self.payload(); data['props']['pageProps']['contentInfo'][field] = value; payloads.append(data)
+        data = self.payload(); data['props']['pageProps']['programCode'] = 'P999'; payloads.append(data)
+        responses = [self.response(data) for data in payloads]
+        responses += [Mock(status_code=200, text='login page'),
+                      Mock(status_code=200, text=self.response().text * 2),
+                      Mock(status_code=200, text='<script id="__NEXT_DATA__">{</script>')]
+        for response in responses:
+            original = self.show()
+            program, result = tving_input.resolve_tving_enrichment_input(self.E, original, Mock(return_value=response))
+            self.assertIsNone(program)
+            self.assertIs(result, original)
+
+    def test_transport_status_and_logger_failures_are_isolated(self):
+        for error in (RuntimeError('private-token'), Mock(status_code=302), Mock(status_code=403), Mock(status_code=500)):
+            get = Mock(side_effect=[error]); setup.P.logger.reset_mock()
+            original = self.show()
+            program, result = tving_input.resolve_tving_enrichment_input(self.E, original, get)
+            self.assertIsNone(program)
+            self.assertIs(result, original)
+            self.assertEqual(get.call_count, 1)
+            self.assertNotIn('private-token', str(setup.P.logger.mock_calls))
+        with patch.object(setup.P.logger, 'info', side_effect=RuntimeError('logger failed')):
+            self.assertEqual(tving_input.resolve_tving_enrichment_input(self.E, self.show(), Mock(return_value=self.response()))[0], self.P)
+
+    def test_dispatch_keeps_legacy_e_input_then_enriches_using_p(self):
+        original = self.show(); before = copy.deepcopy(original)
+        legacy = SimpleNamespace(make_data=Mock(return_value=original))
+        get = Mock(return_value=self.response())
+        env = provider_namespace()
+        env['get_provider_class'] = lambda site: legacy
+        env['resolve_tving_enrichment_input'] = lambda code, show: tving_input.resolve_tving_enrichment_input(code, show, get)
+        env['enrich_tving_dates'] = tving_dates.enrich_tving_dates
+        support = ModuleType('support_site')
+        support.SupportTving = SimpleNamespace(
+            get_program_programid=Mock(return_value={'code': self.P}),
+            get_frequency_programid=Mock(return_value={'has_more': 'N', 'result': [
+                {'episode': {'code': self.E, 'frequency': 1, 'broadcast_date': '20260610'}}]}))
+        with patch.dict(sys.modules, {'support_site': support}):
+            result = env['get_show_data']('KV' + self.E)
+        legacy.make_data.assert_called_once_with(self.E)
+        support.SupportTving.get_program_programid.assert_called_once_with(self.P)
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2026-06-10')
+        self.assertEqual(result['code'], 'KV' + self.P)
+        self.assertEqual(original, before)
+
+    def test_resolution_failure_skips_enrichment_not_yaml(self):
+        env = provider_namespace(); original = self.show()
+        env['get_provider_class'] = lambda site: SimpleNamespace(make_data=lambda code: original)
+        env['resolve_tving_enrichment_input'] = lambda code, show: tving_input.resolve_tving_enrichment_input(
+            code, show, Mock(side_effect=RuntimeError('offline')))
+        env['enrich_tving_dates'] = Mock(side_effect=AssertionError('must skip enrichment'))
+        result = env['get_show_data']('KV' + self.E)
+        self.assertEqual(result['seasons'], original['seasons'])
+        self.assertEqual(result['code'], original['code'])
+        env['enrich_tving_dates'].assert_not_called()
+
+    def test_page_date_is_not_injected_without_support_site_evidence(self):
+        _, show = tving_input.resolve_tving_enrichment_input(self.E, self.show(), Mock(return_value=self.response()))
+        self.assertEqual(show['seasons'][0]['episodes'][0]['originally_available_at'], '')
+
+
+class TmdbPreservationTests(unittest.TestCase):
+    def show(self, fields=None):
+        episode = {'index': 1, 'title': '회차 제목', 'originally_available_at': '2026-06-10',
+                   'thumbs': 'https://example.invalid/original.jpg'}
+        if fields is not None:
+            episode = {'index': 1, 'title': '회차 제목', **fields}
+        return {'title': '원작품', 'seasons': [{'index': 1, 'episodes': [episode]}]}
+
+    def apply(self, episode_data, original):
+        show_meta = {'title': '작품', 'art': [], 'studio': '', 'originaltitle': '', 'country': [],
+                     'genre': [], 'mpaa': '', 'premiered': '', 'ratings': [], 'actor': [], 'extra_info': {}}
+        season = {'art': [], 'plot': '', 'episodes': episode_data}
+        client = SimpleNamespace(info=lambda code: season if code.endswith('_1') else show_meta,
+                                 process_trans=lambda kind, data: data)
+        parent, child = ModuleType('metadata'), ModuleType('metadata.mod_ftv')
+        child.ModuleFtv = lambda package: client
+        with patch.dict(sys.modules, {'metadata': parent, 'metadata.mod_ftv': child}):
+            return tmdb.apply_tmdb_data('FT123', original)
+
+    def test_missing_episode_and_field_exceptions_preserve_existing(self):
+        for episodes in ({}, {1: {}}, [], None, {1: None}):
+            result = self.apply(episodes, self.show())['seasons'][0]['episodes'][0]
+            self.assertEqual(result['originally_available_at'], '2026-06-10')
+            self.assertEqual(result['thumbs'], 'https://example.invalid/original.jpg')
+
+    def test_empty_and_invalid_dates_never_erase_existing(self):
+        for day in ('', '   ', None, '2026-02-30', {}, 20260610):
+            result = self.apply({1: {'premiered': day, 'art': []}}, self.show())
+            episode = normalizer.normalize_export_data(result)['seasons'][0]['episodes'][0]
+            self.assertEqual(episode['originally_available_at'], '2026-06-10')
+            self.assertIn('2026.6.10(수)', episode['title'])
+
+    def test_empty_invalid_thumb_never_erases_existing(self):
+        for art in ([], None, [''], [None], [{}], [{'url': None}], [123]):
+            result = self.apply({1: {'art': art}}, self.show())['seasons'][0]['episodes'][0]
+            self.assertEqual(result['thumbs'], 'https://example.invalid/original.jpg')
+
+    def test_valid_tmdb_values_keep_existing_precedence_and_normalize(self):
+        original = self.show()
+        result = self.apply({1: {'premiered': '2026.06.11', 'art': [{'value': 'https://example.invalid/new.jpg'}]}}, original)
+        self.assertIs(result, original)  # existing in-place merge contract unchanged
+        episode = result['seasons'][0]['episodes'][0]
+        self.assertEqual(episode['originally_available_at'], '2026-06-11')
+        self.assertEqual(episode['thumbs'], 'https://example.invalid/new.jpg')
+
+    def test_date_and_thumbnail_fallback_are_independent(self):
+        result = self.apply({1: {'premiered': '', 'art': ['https://example.invalid/new.jpg']}}, self.show())
+        episode = result['seasons'][0]['episodes'][0]
+        self.assertEqual(episode['originally_available_at'], '2026-06-10')
+        self.assertEqual(episode['thumbs'], 'https://example.invalid/new.jpg')
+        result = self.apply({1: {'premiered': '2026-06-11', 'art': []}}, self.show())
+        episode = result['seasons'][0]['episodes'][0]
+        self.assertEqual(episode['originally_available_at'], '2026-06-11')
+        self.assertEqual(episode['thumbs'], 'https://example.invalid/original.jpg')
+
+    def test_absent_original_fields_remain_empty_not_fabricated(self):
+        result = self.apply({}, self.show({}))
+        episode = result['seasons'][0]['episodes'][0]
+        self.assertEqual(episode['originally_available_at'], '')
+        self.assertEqual(episode['thumbs'], '')
+        exported = normalizer.normalize_export_data(result)['seasons'][0]['episodes'][0]
+        self.assertNotIn('originally_available_at', exported)
+        self.assertNotIn('thumbs', exported)
 
 
 if __name__ == '__main__':
