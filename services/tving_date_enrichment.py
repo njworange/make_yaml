@@ -8,6 +8,7 @@ import re
 from collections import Counter, defaultdict
 
 from .export_normalizer import normalize_date
+from .tving_api_diagnostics import start_season_api_diagnostics
 
 
 MAX_PAGES = 10
@@ -269,6 +270,7 @@ def enrich_tving_dates(program_id, show_data):
         client = importlib.import_module('support_site').SupportTving
         _log_support_methods(client)
         rows = _fetch_rows(client, program_id, diagnostic)
+        start_season_api_diagnostics(client, program_id)
         if not rows:
             if rows == []:
                 _observe(diagnostic, 'record', reason='NO_SOURCE_ROWS')

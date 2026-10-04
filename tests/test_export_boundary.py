@@ -45,6 +45,7 @@ normalizer = load_module(PACKAGE + '.services.export_normalizer', ROOT / 'servic
 coupang = load_module(PACKAGE + '.services.coupang_provider', ROOT / 'services/coupang_provider.py')
 disney = load_module(PACKAGE + '.services.disney_provider', ROOT / 'services/disney_provider.py')
 codes = load_module(PACKAGE + '.services.code_service', ROOT / 'services/code_service.py')
+tving_probe = load_module(PACKAGE + '.services.tving_api_diagnostics', ROOT / 'services/tving_api_diagnostics.py')
 tving_dates = load_module(PACKAGE + '.services.tving_date_enrichment', ROOT / 'services/tving_date_enrichment.py')
 tving_input = load_module(PACKAGE + '.services.tving_input', ROOT / 'services/tving_input.py')
 tmdb = load_module(PACKAGE + '.services.tmdb_service', ROOT / 'services/tmdb_service.py')
@@ -1574,6 +1575,87 @@ class TvingMethodDiscoveryTests(unittest.TestCase):
                     patch.object(target, name, side_effect=RuntimeError('synthetic-secret-error')):
                 result = TvingDateEnrichmentTests.run_enrich(self, TvingDateEnrichmentTests.show())
             self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+
+
+class TvingSeasonApiDiagnosticsTests(unittest.TestCase):
+    def test_signature_and_return_logs_never_include_values(self):
+        calls = []
+        class Client:
+            @classmethod
+            def api_get(cls, url, params=None, timeout=None, secret='fixture-secret-default'):
+                calls.append((url, params, timeout))
+                return {'data': 'fixture-secret-result', 'P001790586': 'private-value'}
+            @staticmethod
+            def get_recent_program_codes(program_code, limit=99):
+                calls.append((program_code, limit))
+                return ['fixture-secret-result']
+        logger = Mock()
+        with patch.object(setup.P, 'logger', logger):
+            tving_probe._run(Client, 'P001790586')
+        self.assertEqual(calls, [
+            ('https://api.tving.com/v2/media/season/program', {'seasonCode': 'T000003022'}, 10),
+            ('P001790586', 1)])
+        logs = [call.args[0] for call in logger.info.call_args_list]
+        signature = json.loads(logs[0].split(' ', 1)[1])
+        self.assertEqual(signature, {'stage': 'SIGNATURE', 'count': 4,
+                                    'parameters': ['url', 'params', 'timeout', 'secret']})
+        self.assertEqual(json.loads(logs[2].split(' ', 1)[1]),
+                         {'status': 'RETURNED', 'type': 'dict', 'length': 2,
+                          'keys': ['data'], 'other_keys': 1})
+        for secret in ('fixture-secret', 'private-value', 'P001790586', 'T000003022'):
+            self.assertNotIn(secret, '\n'.join(logs))
+
+    def test_call_exception_is_sanitized_and_recent_probe_continues(self):
+        calls = []
+        class Client:
+            @staticmethod
+            def api_get(path):
+                calls.append(path)
+                raise RuntimeError('fixture-private-exception')
+            @staticmethod
+            def get_recent_program_codes():
+                calls.append('recent')
+                return None
+        logger = Mock()
+        with patch.object(setup.P, 'logger', logger):
+            tving_probe._run(Client, 'P001790586')
+        self.assertEqual(calls, ['/v2/media/season/program?seasonCode=T000003022', 'recent'])
+        logs = '\n'.join(call.args[0] for call in logger.info.call_args_list)
+        self.assertIn('CALL_FAILED', logs)
+        self.assertIn('RETURNED', logs)
+        self.assertNotIn('fixture-private-exception', logs)
+
+    def test_unknown_signature_and_properties_are_not_executed(self):
+        class Client:
+            @staticmethod
+            def api_get(url, required_auth):
+                raise AssertionError('must not execute')
+            @property
+            def get_recent_program_codes(self):
+                raise AssertionError('must not evaluate property')
+        logger = Mock()
+        with patch.object(setup.P, 'logger', logger):
+            tving_probe._run(Client(), 'P001790586')
+        logs = '\n'.join(call.args[0] for call in logger.info.call_args_list)
+        self.assertIn('SKIPPED_UNSUPPORTED_SIGNATURE', logs)
+        self.assertIn('SIGNATURE_UNAVAILABLE', logs)
+        self.assertNotIn('CALL_STARTED', logs)
+
+    def test_worker_is_targeted_once_nonblocking_and_start_failure_is_safe(self):
+        client = object()
+        for fail in (False, True):
+            with patch.object(tving_probe, '_STARTED', False), \
+                    patch.object(tving_probe.threading, 'Thread') as thread:
+                if fail:
+                    thread.return_value.start.side_effect = RuntimeError('private-error')
+                tving_probe.start_season_api_diagnostics(client, 'P_OTHER')
+                thread.assert_not_called()
+                for _ in range(3):
+                    tving_probe.start_season_api_diagnostics(client, 'P001790586')
+                thread.assert_called_once_with(target=tving_probe._run,
+                    args=(client, 'P001790586'), daemon=True)
+                thread.return_value.start.assert_called_once_with()
+                thread.return_value.join.assert_not_called()
 
 
 if __name__ == '__main__':
