@@ -725,8 +725,10 @@ class TvingDiagnosticTests(unittest.TestCase):
         self.logger.reset_mock()
         result = TvingDateEnrichmentTests.run_enrich(
             self, self.show() if show is None else show, pages, client)
-        self.logger.info.assert_called_once()
-        text = self.logger.info.call_args.args[0]
+        records = [call.args[0] for call in self.logger.info.call_args_list
+                   if call.args and call.args[0].startswith('TVING_DATE_DIAG ')]
+        self.assertEqual(len(records), 1)
+        text = records[0]
         self.assertTrue(text.startswith('TVING_DATE_DIAG '))
         self.logger.error.assert_not_called()
         return result, json.loads(text.split(' ', 1)[1])
@@ -1536,6 +1538,42 @@ class TmdbPreservationTests(unittest.TestCase):
         exported = normalizer.normalize_export_data(result)['seasons'][0]['episodes'][0]
         self.assertNotIn('originally_available_at', exported)
         self.assertNotIn('thumbs', exported)
+
+
+class TvingMethodDiscoveryTests(unittest.TestCase):
+    row = staticmethod(TvingDateEnrichmentTests.row)
+
+    def test_names_only_once_without_property_or_method_execution(self):
+        class Parent:
+            def inherited(self):
+                raise AssertionError('must not execute')
+        class Client(Parent):
+            token = 'synthetic-secret-value'
+            @property
+            def sensitive(self):
+                raise AssertionError('must not execute property')
+            @classmethod
+            def class_method(cls):
+                raise AssertionError('must not execute')
+            @staticmethod
+            def static_method():
+                raise AssertionError('must not execute')
+            def _private(self):
+                raise AssertionError('must not execute')
+        logger = Mock()
+        with patch.object(tving_dates, '_METHODS_DIAG_DONE', False), patch.object(setup.P, 'logger', logger):
+            tving_dates._log_support_methods(Client)
+            tving_dates._log_support_methods(Client)
+        logger.info.assert_called_once_with(
+            'SUPPORTTVING_METHODS_DIAG ["class_method", "inherited", "static_method"]')
+
+    def test_discovery_and_logger_failure_leave_enrichment_unchanged(self):
+        for target in (tving_dates.inspect, setup.P.logger):
+            name = 'getattr_static' if target is tving_dates.inspect else 'info'
+            with patch.object(tving_dates, '_METHODS_DIAG_DONE', False), \
+                    patch.object(target, name, side_effect=RuntimeError('synthetic-secret-error')):
+                result = TvingDateEnrichmentTests.run_enrich(self, TvingDateEnrichmentTests.show())
+            self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
 
 
 if __name__ == '__main__':

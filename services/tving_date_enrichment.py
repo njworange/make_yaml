@@ -2,6 +2,7 @@
 
 import copy
 import importlib
+import inspect
 import json
 import re
 from collections import Counter, defaultdict
@@ -10,6 +11,29 @@ from .export_normalizer import normalize_date
 
 
 MAX_PAGES = 10
+_METHODS_DIAG_DONE = False
+
+
+def _log_support_methods(client):
+    """Once per module load, names only; never invoke methods or properties."""
+    global _METHODS_DIAG_DONE
+    if _METHODS_DIAG_DONE:
+        return
+    _METHODS_DIAG_DONE = True
+    try:
+        names = []
+        for name in dir(client):
+            if name.startswith('_'):
+                continue
+            member = inspect.getattr_static(client, name)
+            if isinstance(member, (classmethod, staticmethod)):
+                member = member.__func__
+            if inspect.isroutine(member):
+                names.append(name)
+        from ..setup import P
+        P.logger.info('SUPPORTTVING_METHODS_DIAG ' + json.dumps(sorted(names), ensure_ascii=True))
+    except Exception:
+        pass  # Discovery/logging failures must not affect metadata enrichment.
 
 
 class _Diagnostics:
@@ -243,6 +267,7 @@ def enrich_tving_dates(program_id, show_data):
             return show_data
         _observe(diagnostic, 'record', stage='SUPPORT_IMPORT')
         client = importlib.import_module('support_site').SupportTving
+        _log_support_methods(client)
         rows = _fetch_rows(client, program_id, diagnostic)
         if not rows:
             if rows == []:
