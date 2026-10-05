@@ -46,41 +46,21 @@ def _method(client, name):
     return member
 
 
-def _probe(client, name, program_id):
-    prefix = 'SEASON_API_CALL_DIAG' if name == 'api_get' else 'RECENT_CODES_DIAG'
+def _probe(client):
+    prefix = 'SEASON_API_CALL_DIAG'
     try:
-        method = _method(client, name)
+        method = _method(client, 'api_get')
         signature = inspect.signature(method, follow_wrapped=False)
         parameters = signature.parameters
         # Never str(signature): defaults/annotations may contain secrets.
-        _log('SEASON_API_SIGNATURE_DIAG' if name == 'api_get' else prefix,
+        _log('SEASON_API_SIGNATURE_DIAG',
              dict(stage='SIGNATURE', count=len(parameters), parameters=list(parameters)))
     except Exception:
         _log(prefix, dict(status='SIGNATURE_UNAVAILABLE'))
         return
-    kwargs = {}
-    if name == 'api_get':
-        routes = [key for key in ('url', 'path', 'endpoint') if key in parameters]
-        if len(routes) != 1:
-            _log(prefix, dict(status='SKIPPED_UNKNOWN_ROUTE_PARAMETER'))
-            return
-        route = '/v2/media/season/program'
-        if routes[0] == 'url':
-            route = 'https://api.tving.com' + route
-        if 'params' in parameters:
-            kwargs['params'] = {'seasonCode': 'T000003022'}
-        else:
-            route += '?seasonCode=T000003022'
-        kwargs[routes[0]] = route
-    else:
-        for key in ('program_code', 'program_id', 'programid'):
-            if key in parameters:
-                kwargs[key] = program_id
-        for key in ('limit', 'count', 'page_size'):
-            if key in parameters:
-                kwargs[key] = 1
-    if 'timeout' in parameters:
-        kwargs['timeout'] = 10
+    # Final probe: the observed api_get(url, **kwargs) signature, relative URL
+    # with query only. No params/timeout/auth kwargs or alternate URL attempts.
+    kwargs = {'url': '/v2/media/season/program?seasonCode=T000003022'}
     try:
         signature.bind(**kwargs)  # Unknown required/positional-only inputs: skip.
     except TypeError:
@@ -90,24 +70,23 @@ def _probe(client, name, program_id):
         _log(prefix, dict(status='CALL_STARTED'))
         result = method(**kwargs)  # Exactly one invocation; never retry.
         _log(prefix, dict(status='RETURNED', **_shape(result)))
-    except Exception:
-        _log(prefix, dict(status='CALL_FAILED'))
+    except Exception as exc:
+        _log(prefix, dict(status='CALL_FAILED', exception_type=type(exc).__name__))
 
 
 def _run(client, program_id):
-    for name in ('api_get', 'get_recent_program_codes'):
-        try:
-            _probe(client, name, program_id)
-        except Exception:
-            pass
+    try:
+        _probe(client)
+    except Exception:
+        pass
 
 
 def start_season_api_diagnostics(client, program_id):
     """Only the requested test program; one daemon worker per module load.
 
     Opaque methods may not accept timeout. Never make the YAML request wait for
-    them. A hung first call also prevents the second probe; no retries or extra
-    workers are created. Internal request count/auth refresh remain client-owned.
+    them. No retries, alternate probes or extra workers are created.
+    Internal request count/auth refresh remain client-owned.
     """
     global _STARTED
     if program_id != 'P001790586':

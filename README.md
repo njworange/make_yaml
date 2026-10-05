@@ -320,14 +320,18 @@ logger/진단 처리 실패도 기존 결과를 바꾸지 않는다. 외부 메�
 다른 플러그인의 자체 로깅까지 이 adapter가 통제하지는 않는다.
 
 임시 시즌 API 진단은 `P001790586`의 날짜 보강 수집 단계에 도달한 경우에만 실행한다.
-모듈 로드당 daemon worker 하나에서 `api_get`과 `get_recent_program_codes`를 각각 최대 1회 호출한다.
-`SEASON_API_SIGNATURE_DIAG` / `SEASON_API_CALL_DIAG` / `RECENT_CODES_DIAG`를 확인한다.
+이번 마지막 시도는 모듈 로드당 daemon worker 하나에서 `api_get`만 최대 1회 호출한다.
+상대 URL `/v2/media/season/program?seasonCode=T000003022`만 전달하고 추가 kwargs는 없다.
+`get_recent_program_codes`는 다시 호출하지 않는다.
+`SEASON_API_SIGNATURE_DIAG` / `SEASON_API_CALL_DIAG`를 확인한다.
 시그니처는 인자 이름·개수만, 응답은 타입·길이·허용된 최상위 구조 키만 기록한다.
-응답 값, 기본 인자 값, 예외 텍스트 및 코드처럼 보이는 임의 응답 키는 출력하지 않는다.
+응답 값, 기본 인자 값, 예외 메시지/스택 및 코드처럼 보이는 임의 응답 키는 출력하지 않는다.
+호출 예외는 `exception_type`에 타입 이름만 남긴다.
 알 수 없는 필수 인자가 있으면 호출을 건너뛰며, 결과는 YAML/날짜 매칭에 사용하지 않는다.
 `RETURNED`는 메서드가 반환했다는 뜻일 뿐 인증/API 성공을 뜻하지 않는다.
-명시적 timeout 인자가 있으면 10초를 전달한다. 없는 메서드에는 강제 timeout을 보장할 수 없어
-YAML 요청에서 worker 완료를 기다리지 않는다. 첫 호출이 멈추면 두 번째 호출도 실행되지 않는다.
+이번 호출에는 timeout 인자도 전달하지 않아 강제 timeout을 보장할 수 없으며,
+YAML 요청에서 worker 완료를 기다리지 않는다. None/예외여도 추가 호출 방식이나 재시도는 없다.
+이번에도 확인되지 않으면 현재 안전하게 확인 가능한 범위에서는 이 API를 가져올 수 없다고 결론짓고 탐색을 중단한다.
 worker별로 별도 1회이며, 외부 client 내부의 재시도·인증 갱신·자체 로그는 통제하지 않는다.
 공유 client의 내부 상태나 background 호출의 Flask 컨텍스트 호환성은 실제 런타임 확인이 필요하다.
 

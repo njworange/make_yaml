@@ -1593,8 +1593,7 @@ class TvingSeasonApiDiagnosticsTests(unittest.TestCase):
         with patch.object(setup.P, 'logger', logger):
             tving_probe._run(Client, 'P001790586')
         self.assertEqual(calls, [
-            ('https://api.tving.com/v2/media/season/program', {'seasonCode': 'T000003022'}, 10),
-            ('P001790586', 1)])
+            ('/v2/media/season/program?seasonCode=T000003022', None, None)])
         logs = [call.args[0] for call in logger.info.call_args_list]
         signature = json.loads(logs[0].split(' ', 1)[1])
         self.assertEqual(signature, {'stage': 'SIGNATURE', 'count': 4,
@@ -1605,12 +1604,12 @@ class TvingSeasonApiDiagnosticsTests(unittest.TestCase):
         for secret in ('fixture-secret', 'private-value', 'P001790586', 'T000003022'):
             self.assertNotIn(secret, '\n'.join(logs))
 
-    def test_call_exception_is_sanitized_and_recent_probe_continues(self):
+    def test_call_exception_type_only_and_no_other_probe(self):
         calls = []
         class Client:
             @staticmethod
-            def api_get(path):
-                calls.append(path)
+            def api_get(url):
+                calls.append(url)
                 raise RuntimeError('fixture-private-exception')
             @staticmethod
             def get_recent_program_codes():
@@ -1619,10 +1618,11 @@ class TvingSeasonApiDiagnosticsTests(unittest.TestCase):
         logger = Mock()
         with patch.object(setup.P, 'logger', logger):
             tving_probe._run(Client, 'P001790586')
-        self.assertEqual(calls, ['/v2/media/season/program?seasonCode=T000003022', 'recent'])
+        self.assertEqual(calls, ['/v2/media/season/program?seasonCode=T000003022'])
         logs = '\n'.join(call.args[0] for call in logger.info.call_args_list)
         self.assertIn('CALL_FAILED', logs)
-        self.assertIn('RETURNED', logs)
+        self.assertIn('"exception_type": "RuntimeError"', logs)
+        self.assertNotIn('RETURNED', logs)
         self.assertNotIn('fixture-private-exception', logs)
 
     def test_unknown_signature_and_properties_are_not_executed(self):
@@ -1638,8 +1638,31 @@ class TvingSeasonApiDiagnosticsTests(unittest.TestCase):
             tving_probe._run(Client(), 'P001790586')
         logs = '\n'.join(call.args[0] for call in logger.info.call_args_list)
         self.assertIn('SKIPPED_UNSUPPORTED_SIGNATURE', logs)
-        self.assertIn('SIGNATURE_UNAVAILABLE', logs)
         self.assertNotIn('CALL_STARTED', logs)
+        class PropertyClient:
+            @property
+            def api_get(self):
+                raise AssertionError('must not evaluate property')
+        with patch.object(setup.P, 'logger', logger):
+            tving_probe._run(PropertyClient(), 'P001790586')
+        self.assertIn('SIGNATURE_UNAVAILABLE', logger.info.call_args.args[0])
+
+    def test_observed_signature_none_result_is_once_with_no_extra_kwargs(self):
+        calls = []
+        class Client:
+            @staticmethod
+            def api_get(url, **kwargs):
+                calls.append((url, kwargs))
+                return None
+            @staticmethod
+            def get_recent_program_codes(*args, **kwargs):
+                raise AssertionError('must not retry recent codes')
+        logger = Mock()
+        with patch.object(setup.P, 'logger', logger):
+            tving_probe._run(Client, 'P001790586')
+        self.assertEqual(calls, [('/v2/media/season/program?seasonCode=T000003022', {})])
+        self.assertEqual(json.loads(logger.info.call_args.args[0].split(' ', 1)[1]),
+                         {'status': 'RETURNED', 'type': 'none'})
 
     def test_worker_is_targeted_once_nonblocking_and_start_failure_is_safe(self):
         client = object()
