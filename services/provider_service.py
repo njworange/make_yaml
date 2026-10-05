@@ -13,7 +13,7 @@ from ..providers.legacy_registry import get_provider_class
 from ..setup import P
 from .episode_title import KOREAN_WEEKDAYS, format_korean_broadcast_date, strip_broadcast_prefix
 from .tving_date_enrichment import enrich_tving_dates
-from .tving_input import resolve_tving_enrichment_input
+from .tving_input import resolve_tving_enrichment_input, scope_tving_program
 from .coupang_provider import build_coupang_show_data, extract_coupang_title_code
 from .disney_provider import build_disney_show_data, uses_disney_public_route
 
@@ -1472,6 +1472,7 @@ def normalize_tving_show_data(show_data):
 def get_show_data(code):
     site = ''
     site_code = ''
+    scoped_tving_index = None
     try:
         logger.debug(code)
         site = code[:2]
@@ -1531,9 +1532,14 @@ def get_show_data(code):
                 show_data = provider_class.make_data(site_code)
         if site == 'KV':
             show_data = normalize_tving_show_data(show_data)
+            show_data, scoped_tving_index = scope_tving_program(site_code, show_data)
             program_id, show_data = resolve_tving_enrichment_input(site_code, show_data)
             if program_id is not None:
-                show_data = enrich_tving_dates(program_id, show_data)
+                if scoped_tving_index is not None:
+                    show_data = enrich_tving_dates(program_id, show_data,
+                                                  verified_season_index=scoped_tving_index)
+                else:
+                    show_data = enrich_tving_dates(program_id, show_data)
         elif site == 'KW':
             show_data = normalize_wavve_show_data(site_code, show_data)
         if isinstance(show_data, dict):
@@ -1549,7 +1555,8 @@ def get_show_data(code):
             logger.debug(f"YAMLUTILS get_data result site={site} type=list len={len(show_data)}")
         else:
             logger.debug(f"YAMLUTILS get_data result site={site} type={type(show_data).__name__} truthy={bool(show_data)}")
-        if P.ModelSetting.get_int('split_season') != 1 and isinstance(show_data, dict):
+        if (scoped_tving_index is None and P.ModelSetting.get_int('split_season') != 1
+                and isinstance(show_data, dict)):
             show_dict = show_data
             season_data = []
             split_season = P.ModelSetting.get_int('split_season')

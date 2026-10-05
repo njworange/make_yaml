@@ -8,7 +8,6 @@ import re
 from collections import Counter, defaultdict
 
 from .export_normalizer import normalize_date
-from .tving_api_diagnostics import start_season_api_diagnostics
 
 
 MAX_PAGES = 10
@@ -221,14 +220,16 @@ def _fetch_rows(client, program_id, diagnostic=None):
     return None
 
 
-def enrich_tving_dates(program_id, show_data):
+def enrich_tving_dates(program_id, show_data, *, verified_season_index=None):
     """Fill only absent dates, preserving titles, existing values and source ownership.
 
     Code matches are authoritative (a supplied but unmatched code never falls back).
     The API has no verified season field. Frequency fallback is limited to a show
     explicitly bound to this program, containing ONLY local season 1. This is the
     adapter's single-program/single-season convention, not inferred remote season
-    metadata. Multi-season, specials and other local season numbers require codes.
+    metadata. A caller may supply the index verified by scope_tving_program's
+    public P-code/season_no binding, after filtering. Otherwise the old scope
+    and multi-season code-first behavior remain unchanged.
     """
     try:
         diagnostic = _Diagnostics()
@@ -253,6 +254,13 @@ def enrich_tving_dates(program_id, show_data):
         if not isinstance(seasons, list):
             _observe(diagnostic, 'record', reason='INVALID_LOCAL_SHAPE')
             return show_data
+        verified_scope = (type(verified_season_index) is int and verified_season_index > 0
+                          and _code(show_code) == program_id and len(seasons) == 1
+                          and isinstance(seasons[0], dict)
+                          and _index(seasons[0].get('index')) == verified_season_index)
+        frequency_season = verified_season_index if verified_scope else 1
+        if verified_scope:
+            _observe(diagnostic, 'record', frequency_scope=True, scope_reason='VERIFIED_PROGRAM_SEASON')
         targets = []
         for season in seasons:
             if not isinstance(season, dict) or not isinstance(season.get('episodes'), list):
@@ -270,7 +278,6 @@ def enrich_tving_dates(program_id, show_data):
         client = importlib.import_module('support_site').SupportTving
         _log_support_methods(client)
         rows = _fetch_rows(client, program_id, diagnostic)
-        start_season_api_diagnostics(client, program_id)
         if not rows:
             if rows == []:
                 _observe(diagnostic, 'record', reason='NO_SOURCE_ROWS')
@@ -281,9 +288,9 @@ def enrich_tving_dates(program_id, show_data):
             if code:
                 by_code[code].append(row_index)
             if frequency:
-                by_frequency[(1, frequency)].append(row_index)
-        frequency_scope = (_code(show_code) == program_id and len(seasons) == 1
-                           and _index(seasons[0].get('index')) == 1)
+                by_frequency[(frequency_season, frequency)].append(row_index)
+        frequency_scope = (verified_scope or (_code(show_code) == program_id and len(seasons) == 1
+                           and _index(seasons[0].get('index')) == 1))
         target_keys = Counter((_index(season.get('index')), _index(episode.get('index')))
                               for season, episode in targets)
         matches = []

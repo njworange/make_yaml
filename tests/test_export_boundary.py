@@ -45,7 +45,6 @@ normalizer = load_module(PACKAGE + '.services.export_normalizer', ROOT / 'servic
 coupang = load_module(PACKAGE + '.services.coupang_provider', ROOT / 'services/coupang_provider.py')
 disney = load_module(PACKAGE + '.services.disney_provider', ROOT / 'services/disney_provider.py')
 codes = load_module(PACKAGE + '.services.code_service', ROOT / 'services/code_service.py')
-tving_probe = load_module(PACKAGE + '.services.tving_api_diagnostics', ROOT / 'services/tving_api_diagnostics.py')
 tving_dates = load_module(PACKAGE + '.services.tving_date_enrichment', ROOT / 'services/tving_date_enrichment.py')
 tving_input = load_module(PACKAGE + '.services.tving_input', ROOT / 'services/tving_input.py')
 tmdb = load_module(PACKAGE + '.services.tmdb_service', ROOT / 'services/tmdb_service.py')
@@ -74,6 +73,7 @@ def provider_namespace():
         'strip_broadcast_prefix': titles.strip_broadcast_prefix,
         'enrich_tving_dates': lambda code, value: value,
         'resolve_tving_enrichment_input': lambda code, value: (code, value),
+        'scope_tving_program': lambda code, value: (value, None),
         'extract_coupang_title_code': coupang.extract_coupang_title_code,
         'uses_disney_public_route': disney.uses_disney_public_route,
         'format_korean_broadcast_date': titles.format_korean_broadcast_date,
@@ -1577,108 +1577,201 @@ class TvingMethodDiscoveryTests(unittest.TestCase):
             self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
 
 
-class TvingSeasonApiDiagnosticsTests(unittest.TestCase):
-    def test_signature_and_return_logs_never_include_values(self):
-        calls = []
-        class Client:
-            @classmethod
-            def api_get(cls, url, params=None, timeout=None, secret='fixture-secret-default'):
-                calls.append((url, params, timeout))
-                return {'data': 'fixture-secret-result', 'P001790586': 'private-value'}
-            @staticmethod
-            def get_recent_program_codes(program_code, limit=99):
-                calls.append((program_code, limit))
-                return ['fixture-secret-result']
-        logger = Mock()
-        with patch.object(setup.P, 'logger', logger):
-            tving_probe._run(Client, 'P001790586')
-        self.assertEqual(calls, [
-            ('/v2/media/season/program?seasonCode=T000003022', None, None)])
-        logs = [call.args[0] for call in logger.info.call_args_list]
-        signature = json.loads(logs[0].split(' ', 1)[1])
-        self.assertEqual(signature, {'stage': 'SIGNATURE', 'count': 4,
-                                    'parameters': ['url', 'params', 'timeout', 'secret']})
-        self.assertEqual(json.loads(logs[2].split(' ', 1)[1]),
-                         {'status': 'RETURNED', 'type': 'dict', 'length': 2,
-                          'keys': ['data'], 'other_keys': 1})
-        for secret in ('fixture-secret', 'private-value', 'P001790586', 'T000003022'):
-            self.assertNotIn(secret, '\n'.join(logs))
+class TvingSeasonScopeTests(unittest.TestCase):
+    P = 'P001790586'
+    row = staticmethod(TvingDateEnrichmentTests.row)
 
-    def test_call_exception_type_only_and_no_other_probe(self):
-        calls = []
-        class Client:
-            @staticmethod
-            def api_get(url):
-                calls.append(url)
-                raise RuntimeError('fixture-private-exception')
-            @staticmethod
-            def get_recent_program_codes():
-                calls.append('recent')
-                return None
-        logger = Mock()
-        with patch.object(setup.P, 'logger', logger):
-            tving_probe._run(Client, 'P001790586')
-        self.assertEqual(calls, ['/v2/media/season/program?seasonCode=T000003022'])
-        logs = '\n'.join(call.args[0] for call in logger.info.call_args_list)
-        self.assertIn('CALL_FAILED', logs)
-        self.assertIn('"exception_type": "RuntimeError"', logs)
-        self.assertNotIn('RETURNED', logs)
-        self.assertNotIn('fixture-private-exception', logs)
+    def show(self):
+        return {'code': 'KV' + self.P, 'title': '작품', 'seasons': [
+            {'index': 1, 'episodes': [{'index': 1}, {'index': 2}]},
+            {'index': 4, 'title': '시즌 4', 'posters': [{'url': 'https://example.invalid/a.jpg'}],
+             'episodes': [{'index': 1, 'title': '원본 제목'}, {'index': 2}, {'index': 3}]}]}
 
-    def test_unknown_signature_and_properties_are_not_executed(self):
-        class Client:
-            @staticmethod
-            def api_get(url, required_auth):
-                raise AssertionError('must not execute')
-            @property
-            def get_recent_program_codes(self):
-                raise AssertionError('must not evaluate property')
-        logger = Mock()
-        with patch.object(setup.P, 'logger', logger):
-            tving_probe._run(Client(), 'P001790586')
-        logs = '\n'.join(call.args[0] for call in logger.info.call_args_list)
-        self.assertIn('SKIPPED_UNSUPPORTED_SIGNATURE', logs)
-        self.assertNotIn('CALL_STARTED', logs)
-        class PropertyClient:
-            @property
-            def api_get(self):
-                raise AssertionError('must not evaluate property')
-        with patch.object(setup.P, 'logger', logger):
-            tving_probe._run(PropertyClient(), 'P001790586')
-        self.assertIn('SIGNATURE_UNAVAILABLE', logger.info.call_args.args[0])
+    def response(self, number=4, program=None):
+        props = {'programCode': self.P, 'contentInfo': {
+            'program_code': self.P if program is None else program, 'season_no': number}}
+        return Mock(status_code=200, text='<script id="__NEXT_DATA__">' +
+                    json.dumps({'props': {'pageProps': props}}) + '</script>')
 
-    def test_observed_signature_none_result_is_once_with_no_extra_kwargs(self):
-        calls = []
-        class Client:
-            @staticmethod
-            def api_get(url, **kwargs):
-                calls.append((url, kwargs))
-                return None
-            @staticmethod
-            def get_recent_program_codes(*args, **kwargs):
-                raise AssertionError('must not retry recent codes')
-        logger = Mock()
-        with patch.object(setup.P, 'logger', logger):
-            tving_probe._run(Client, 'P001790586')
-        self.assertEqual(calls, [('/v2/media/season/program?seasonCode=T000003022', {})])
-        self.assertEqual(json.loads(logger.info.call_args.args[0].split(' ', 1)[1]),
-                         {'status': 'RETURNED', 'type': 'none'})
+    def provider(self, original, get, client=None, split=2):
+        env = provider_namespace()
+        env['scope_tving_program'] = lambda code, show: tving_input.scope_tving_program(code, show, get)
+        env['enrich_tving_dates'] = tving_dates.enrich_tving_dates
+        env['get_provider_class'] = lambda site: SimpleNamespace(make_data=lambda code: original)
+        env['P'].ModelSetting.get_int = lambda key: split
+        if client is None:
+            client = SimpleNamespace(get_program_programid=Mock(return_value={'code': self.P}),
+                get_frequency_programid=Mock(return_value={'result': [self.row('E401', 1),
+                    self.row('E402', 2, '20240301')], 'has_more': 'N'}))
+        support = ModuleType('support_site'); support.SupportTving = client
+        before = copy.deepcopy(original)
+        with patch.dict(sys.modules, {'support_site': support}):
+            result = env['get_show_data']('KV' + self.P)
+        self.assertEqual(original, before)
+        return result, client
 
-    def test_worker_is_targeted_once_nonblocking_and_start_failure_is_safe(self):
-        client = object()
-        for fail in (False, True):
-            with patch.object(tving_probe, '_STARTED', False), \
-                    patch.object(tving_probe.threading, 'Thread') as thread:
-                if fail:
-                    thread.return_value.start.side_effect = RuntimeError('private-error')
-                tving_probe.start_season_api_diagnostics(client, 'P_OTHER')
-                thread.assert_not_called()
-                for _ in range(3):
-                    tving_probe.start_season_api_diagnostics(client, 'P001790586')
-                thread.assert_called_once_with(target=tving_probe._run,
-                    args=(client, 'P001790586'), daemon=True)
-                thread.return_value.start.assert_called_once_with()
-                thread.return_value.join.assert_not_called()
+    def test_verified_scope_overrides_wrong_unique_count_and_split(self):
+        original = self.show(); get = Mock(return_value=self.response())
+        result, client = self.provider(original, get)
+        self.assertEqual([s['index'] for s in result['seasons']], [4])
+        self.assertEqual(result['seasons'][0]['posters'], original['seasons'][1]['posters'])
+        episodes = result['seasons'][0]['episodes']
+        self.assertEqual(episodes[0]['originally_available_at'], '2024-02-29')
+        self.assertEqual(episodes[1]['originally_available_at'], '2024-03-01')
+        self.assertNotIn('originally_available_at', episodes[2])
+        self.assertEqual(episodes[0]['title'], '원본 제목')
+        get.assert_called_once_with('https://www.tving.com/contents/' + self.P,
+            headers={'User-Agent': 'Mozilla/5.0'}, timeout=(5, 15), allow_redirects=False)
+        get.return_value.close.assert_called_once()
+        client.get_frequency_programid.assert_called_once_with(self.P, page=1)
+        output = normalizer.normalize_export_data(result)
+        self.assertEqual(output['seasons'][0]['index'], 4)
+        self.assertNotIn('verified_season_index', yaml.safe_dump(output))
+
+    def test_existing_dates_still_filter_without_support_fetch(self):
+        original = self.show()
+        for ep in original['seasons'][1]['episodes']:
+            ep['originally_available_at'] = '2020-01-01'
+        result, client = self.provider(original, Mock(return_value=self.response()))
+        self.assertEqual(result['seasons'], [provider_namespace()['normalize_tving_show_data'](original)['seasons'][1]])
+        client.get_program_programid.assert_not_called()
+
+    def test_zero_or_duplicate_index_matches_keep_original(self):
+        for number in (2, 3):
+            original = self.show()
+            original['seasons'] += [{'index': 3, 'episodes': []}, {'index': '3', 'episodes': []}]
+            with patch.object(setup.P, 'logger', Mock()) as logger:
+                result, index = tving_input.scope_tving_program(self.P, original, Mock(return_value=self.response(number)))
+            self.assertIs(result, original); self.assertIsNone(index)
+            self.assertIn('SCOPE_NO_MATCH' if number == 2 else 'SCOPE_AMBIGUOUS', str(logger.info.call_args))
+
+    def test_invalid_remote_identity_and_season_never_filter(self):
+        for number in (None, 0, True, -1, 4.0, 'season 4', '4.0', [], {}):
+            original = self.show()
+            result, index = tving_input.scope_tving_program(self.P, original, Mock(return_value=self.response(number)))
+            self.assertIs(result, original); self.assertIsNone(index)
+        for response in (self.response(program='P999'), Mock(status_code=200, text='{}'),
+                         Mock(status_code=200, text=self.response().text.replace('"programCode": "' + self.P + '"', '"programCode": "P999"'))):
+            original = self.show()
+            self.assertEqual(tving_input.scope_tving_program(self.P, original, Mock(return_value=response)), (original, None))
+
+    def test_transport_and_malformed_pages_fail_closed_safely(self):
+        failures = [RuntimeError('fixture-secret'), Mock(status_code=302), Mock(status_code=500),
+            Mock(status_code=200, text='login page'), Mock(status_code=200, text=self.response().text * 2),
+            Mock(status_code=200, text='<script id="__NEXT_DATA__">{</script>'),
+            Mock(status_code=200, text='<script id="__NEXT_DATA__">{}'),
+            Mock(status_code=200, text='x' * 5_000_001)]
+        for failure in failures:
+            original = self.show(); get = Mock(side_effect=[failure])
+            with patch.object(setup.P, 'logger', Mock()) as logger:
+                result, index = tving_input.scope_tving_program(self.P, original, get)
+            self.assertIs(result, original); self.assertIsNone(index)
+            self.assertEqual(get.call_count, 1)
+            self.assertNotIn('fixture-secret', str(logger.mock_calls))
+
+    def test_single_season_and_e_input_make_no_scope_request(self):
+        original = self.show()
+        original['seasons'] = original['seasons'][1:]
+        get = Mock(side_effect=AssertionError('no HTTP'))
+        for code, show in ((self.P, original), ('E004572986', self.show()), ('P../bad', self.show())):
+            result, index = tving_input.scope_tving_program(code, show, get)
+            self.assertIs(result, show); self.assertIsNone(index)
+        get.assert_not_called()
+        result, client = self.provider(original, get)
+        self.assertEqual([s['index'] for s in result['seasons']], [4, 104])
+        self.assertNotIn('originally_available_at', result['seasons'][0]['episodes'][0])
+
+    def test_local_conflicts_and_malformed_shapes_skip_http(self):
+        for change in ('code', 'index', 'episodes', 'episode'):
+            original = self.show()
+            if change == 'code': original['code'] = 'KVP999'
+            elif change == 'index': original['seasons'][0]['index'] = None
+            elif change == 'episodes': original['seasons'][0]['episodes'] = {}
+            else: original['seasons'][0]['episodes'] = [None]
+            get = Mock(side_effect=AssertionError('no HTTP'))
+            self.assertEqual(tving_input.scope_tving_program(self.P, original, get), (original, None))
+            get.assert_not_called()
+
+    def test_numeric_string_index_preserved_and_logger_failure_isolated(self):
+        original = self.show(); original['seasons'][1]['index'] = '04'
+        with patch.object(setup.P.logger, 'info', side_effect=RuntimeError('logger failed')):
+            result, client = self.provider(original, Mock(return_value=self.response('4')))
+        self.assertEqual(result['seasons'][0]['index'], '04')
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+
+    def test_page_failure_preserves_multiseason_code_first_and_split(self):
+        original = self.show()
+        original['seasons'][0]['episodes'][0]['code'] = 'E401'
+        original['seasons'][1]['episodes'][0]['code'] = 'E402'
+        result, client = self.provider(original, Mock(side_effect=RuntimeError('page failed')))
+        self.assertEqual([s['index'] for s in result['seasons']], [1, 101, 4, 104])
+        self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+        self.assertEqual(result['seasons'][2]['episodes'][0]['originally_available_at'], '2024-03-01')
+
+    def test_support_failure_keeps_verified_selection_without_fake_dates(self):
+        for client in (SimpleNamespace(), SimpleNamespace(
+                get_program_programid=Mock(side_effect=RuntimeError('auth failed'))),
+                SimpleNamespace(get_program_programid=Mock(return_value={'code': 'P999'}))):
+            original = self.show()
+            result, _ = self.provider(original, Mock(return_value=self.response()), client)
+            self.assertEqual(result['seasons'], [provider_namespace()['normalize_tving_show_data'](original)['seasons'][1]])
+
+    def test_ambiguous_or_absent_scope_keeps_code_first_across_seasons(self):
+        for number in (2, 3):
+            original = self.show()
+            original['seasons'][0]['episodes'][0]['code'] = 'E401'
+            original['seasons'][1]['episodes'][0]['code'] = 'E402'
+            original['seasons'] += [{'index': 3, 'episodes': []}, {'index': 3, 'episodes': []}]
+            result, _ = self.provider(original, Mock(return_value=self.response(number)), split=1)
+            self.assertEqual([s['index'] for s in result['seasons']], [1, 4, 3, 3])
+            self.assertEqual(result['seasons'][0]['episodes'][0]['originally_available_at'], '2024-02-29')
+            self.assertEqual(result['seasons'][1]['episodes'][0]['originally_available_at'], '2024-03-01')
+
+    def test_verified_matching_keeps_code_priority_dates_and_duplicate_guards(self):
+        original = self.show()
+        original['seasons'][1]['episodes'] = [
+            {'index': 1, 'code': 'E999'}, {'index': 20, 'code': 'E402', 'originally_available_at': '2020-01-01'},
+            {'index': 2}, {'index': 1}, {'index': 1}]
+        result, _ = self.provider(original, Mock(return_value=self.response()))
+        self.assertEqual(result['seasons'], [provider_namespace()['normalize_tving_show_data'](original)['seasons'][1]])
+
+    def test_scoped_fetch_discards_partial_pages_and_duplicate_sources(self):
+        pagesets = [
+            [{'result': [self.row('E401', 1)], 'has_more': 'Y'}, RuntimeError('page failed')],
+            [{'result': [self.row('E401', 1), self.row('E402', 1)], 'has_more': 'N'}],
+            [{'result': [self.row('E401', 1), self.row('E401', 2)], 'has_more': 'N'}],
+            [{'result': [self.row('E401', 1, 'bad-date')], 'has_more': 'N'}]]
+        for pages in pagesets:
+            original = self.show()
+            client = SimpleNamespace(get_program_programid=Mock(return_value={'code': self.P}),
+                                     get_frequency_programid=Mock(side_effect=pages))
+            result, _ = self.provider(original, Mock(return_value=self.response()), client)
+            self.assertEqual([s['index'] for s in result['seasons']], [4])
+            self.assertTrue(all('originally_available_at' not in ep for ep in result['seasons'][0]['episodes']))
+
+    def test_scope_diagnostics_are_log_only_and_selection_is_nonmutating(self):
+        original = self.show(); before = copy.deepcopy(original)
+        selected, index = tving_input.scope_tving_program(self.P, original, Mock(return_value=self.response()))
+        self.assertEqual(original, before); self.assertIsNot(selected, original)
+        self.assertEqual(set(selected), set(original))
+        client = SimpleNamespace(get_program_programid=Mock(return_value={'code': self.P}),
+            get_frequency_programid=Mock(return_value={'result': [self.row('E401', 1)], 'has_more': 'N'}))
+        with patch.object(setup.P, 'logger', Mock()) as logger:
+            result, _ = self.provider(original, Mock(return_value=self.response()), client)
+        records = [json.loads(c.args[0].split(' ', 1)[1]) for c in logger.info.call_args_list
+                   if c.args[0].startswith('TVING_DATE_DIAG ')]
+        self.assertEqual(records[-1]['scope_reason'], 'VERIFIED_PROGRAM_SEASON')
+        self.assertTrue(records[-1]['frequency_scope'])
+        self.assertNotIn('scope_reason', yaml.safe_dump(result))
+
+    def test_no_closed_discovery_api_is_invoked(self):
+        client = SimpleNamespace(get_program_programid=Mock(return_value={'code': self.P}),
+            get_frequency_programid=Mock(return_value={'result': [self.row()], 'has_more': 'N'}),
+            api_get=Mock(side_effect=AssertionError('closed API')),
+            get_recent_program_codes=Mock(side_effect=AssertionError('closed API')))
+        result, _ = self.provider(self.show(), Mock(return_value=self.response()), client)
+        self.assertEqual(len(result['seasons']), 1)
+        client.api_get.assert_not_called(); client.get_recent_program_codes.assert_not_called()
 
 
 if __name__ == '__main__':

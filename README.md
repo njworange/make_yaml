@@ -231,7 +231,8 @@ Wavve/Tving/Prime/AppleTV/EBS의 중간 provider 데이터에서는 날짜 장�
   code-first 매칭, season1-only frequency fallback, 페이지 상한은 그대로 유지한다.
 - 공개 조회 실패·잘못된 HTML/JSON·응답 identity 불일치·로컬 코드 충돌이면 **추가 날짜 보강만 생략**하고
   기존 metadata로 진행한다. 코드 충돌을 임의로 교정하거나 E코드로 프로그램 API를 다시 요청하지 않는다.
-- P코드 입력은 추가 공개 HTTP 요청 없이 기존 경로 그대로다. E 조회는 연결/읽기 timeout 5초/15초,
+- 단일 시즌 P코드 입력은 추가 공개 HTTP 요청 없이 기존 경로 그대로다(다중 시즌은 아래 1.0.39 규칙).
+  E 조회는 연결/읽기 timeout 5초/15초,
   redirect/재시도/polling 없음, 최소 User-Agent만 사용한다. 로그인 정보·세션·쿠키를 직접 읽거나 저장하지 않는다.
   파싱 HTML은 5백만 문자 이하로 제한한다(네트워크 streaming/전체 wall-clock 제한은 아님).
 - 로그는 `TVING_INPUT_DIAG reason=EPISODE_RESOLVED`, `EPISODE_RESOLUTION_FAILED`,
@@ -261,10 +262,12 @@ support_site 프로그램/회차 API가 정상 응답하는지는 새 로그로 
 
 - 요청한 프로그램 ID와 응답 프로그램 `code`를 확인한다. 기존 작품 코드가 다른 경우 보강하지 않는다.
 - 회차 `code`(raw 또는 `KV` 접두어)가 있으면 유일한 코드 일치만 사용한다. 코드가 불일치하면 회차번호로 재시도하지 않는다.
-- raw API에서 시즌 번호 필드는 확인되지 않았다. 코드 없는 회차는 **작품 코드가 프로그램과 일치하고,
+- raw API에서 시즌 번호 필드는 확인되지 않았다. 공개 페이지로 범위를 확인하지 않은 경우,
+  코드 없는 회차는 **작품 코드가 프로그램과 일치하고,
   로컬 시즌이 하나뿐이며 그 index가 1인 경우에만** `(시즌 1, frequency)`로 매칭한다.
   이는 프로그램별 단일 시즌 표현을 사용하는 제한적인 매핑 관례이지 원격 시즌 번호를 확인했다는 뜻은 아니다.
   다중 시즌·특집 시즌(0)·그 밖의 시즌 번호에서는 코드 없이 날짜를 추정하지 않는다.
+  아래 공개 P코드 페이지로 확인·필터링한 시즌만 예외로 해당 시즌 번호의 frequency 매칭을 허용한다.
 - source/target의 중복 코드·중복 회차번호 또는 같은 source를 여러 target이 요구하면 모호한 매칭은 건너뛴다.
 - 채택하는 날짜는 회차 `episode.broadcast_date`뿐이다. 8자리 `YYYYMMDD`는 `YYYY-MM-DD`로 변환 후
   기존 export 날짜 검증을 통과해야 한다. 프로그램 `broad_dt`나 이미지 URL의 날짜는 사용하지 않는다.
@@ -280,6 +283,32 @@ support_site 프로그램/회차 API가 정상 응답하는지는 새 로그로 
 오프라인 fixture 검증은 실제 계정 인증이나 날짜/회차 수의 완전성을 증명하지 않는다.
 외부 메서드의 timeout·토큰 갱신·호출 제한은 `support_site` 구현에 의존한다. 페이지 상한은 개별 요청의
 실행 시간 제한이 아니므로 live FlaskFarm에서 응답 시간과 실제 매칭률은 별도 확인이 필요하다.
+
+###### **<입력한 티빙 P코드의 시즌만 출력 (1.0.39)>**
+
+legacy가 여러 시즌을 묶어 반환한 **P코드 직접 입력**에만 적용한다. 공개
+`https://www.tving.com/contents/{P코드}` HTML을 1회 조회하여 `contentInfo.program_code`가
+요청 P코드와 일치하는지 확인하고, `season_no`와 같은 로컬 `index`가 유일할 때만 복사본에 남긴다.
+예를 들어 `season_no=4`가 확인되면 시즌 4만 출력하며 원래 index/제목/포스터/회차 번호를 보존한다.
+회차 개수는 시즌 식별에 사용하지 않는다. API가 일부 회차만 제공하더라도 다른 시즌을 선택하지 않는다.
+
+- `season_no`는 양의 정수 또는 숫자 문자열만 인정한다. 시즌 0/누락/비정상 값,
+  로컬 일치 0개 또는 중복 index(예: 정규 시즌 3과 스페셜 시즌 3)는 필터링하지 않는다.
+- 공개 페이지 실패/identity 충돌도 필터링하지 않고 기존 다중 시즌 code-first 보강을 유지한다.
+  단일 시즌과 E코드 입력의 기존 선택·매칭 규칙 및 요청 수는 변경하지 않는다.
+- 이미 날짜가 모두 있어도 시즌 필터링은 적용한다. 확인된 시즌에만 기존 support_site 날짜 보강을 실행하며,
+  code-first, 중복 source/target 차단, 기존 날짜 우선, 전량 fetch 폐기 정책은 유지한다.
+  공개 페이지의 진입 회차 날짜를 다른 회차에 복제하지 않는다.
+- 공개 identity로 필터링이 성공했다면 날짜 API 실패와 관계없이 **그 시즌만 유지**한다.
+  날짜가 없는 회차는 export에서 날짜 필드를 생략한다. 이 경우에도 다른 시즌을 다시 붙이지 않는다.
+- 필터링된 결과에만 `split_season` 복제를 생략한다. 미필터링/다른 provider의 설정 동작은 그대로다.
+  선택 상태는 함수 인자/로컬 변수로만 전달하며 YAML에 내부 표식을 넣지 않는다.
+- 공개 조회는 E코드 처리와 같은 연결/읽기 timeout 5초/15초, redirect·재시도 없음,
+  최소 User-Agent 및 HTML 파싱 크기 제한을 사용한다. live 응답/계정 검증은 오프라인 테스트와 별개다.
+- `TVING_INPUT_DIAG`의 `SCOPE_SELECTED`, `SCOPE_NO_MATCH`, `SCOPE_AMBIGUOUS`,
+  `SCOPE_PROGRAM_MISMATCH`, `SCOPE_LOCAL_PROGRAM_CONFLICT`, `SCOPE_SEASON_INVALID`,
+  `SCOPE_INVALID_LOCAL_SHAPE`, `SCOPE_LOOKUP_FAILED`로 선택/포기 이유를 구분한다.
+  선택 후 `TVING_DATE_DIAG.scope_reason=VERIFIED_PROGRAM_SEASON`은 그 범위의 날짜 매칭을 뜻한다.
 
 **진단 로그 (1.0.33부터)**
 
@@ -319,21 +348,8 @@ INFO 로그가 필터링되거나 adapter 호출 전에 실패한 경우에는 �
 logger/진단 처리 실패도 기존 결과를 바꾸지 않는다. 외부 메서드가 반환하지 않는 경우에는 완료 로그도 없으며,
 다른 플러그인의 자체 로깅까지 이 adapter가 통제하지는 않는다.
 
-임시 시즌 API 진단은 `P001790586`의 날짜 보강 수집 단계에 도달한 경우에만 실행한다.
-이번 마지막 시도는 모듈 로드당 daemon worker 하나에서 `api_get`만 최대 1회 호출한다.
-상대 URL `/v2/media/season/program?seasonCode=T000003022`만 전달하고 추가 kwargs는 없다.
-`get_recent_program_codes`는 다시 호출하지 않는다.
-`SEASON_API_SIGNATURE_DIAG` / `SEASON_API_CALL_DIAG`를 확인한다.
-시그니처는 인자 이름·개수만, 응답은 타입·길이·허용된 최상위 구조 키만 기록한다.
-응답 값, 기본 인자 값, 예외 메시지/스택 및 코드처럼 보이는 임의 응답 키는 출력하지 않는다.
-호출 예외는 `exception_type`에 타입 이름만 남긴다.
-알 수 없는 필수 인자가 있으면 호출을 건너뛰며, 결과는 YAML/날짜 매칭에 사용하지 않는다.
-`RETURNED`는 메서드가 반환했다는 뜻일 뿐 인증/API 성공을 뜻하지 않는다.
-이번 호출에는 timeout 인자도 전달하지 않아 강제 timeout을 보장할 수 없으며,
-YAML 요청에서 worker 완료를 기다리지 않는다. None/예외여도 추가 호출 방식이나 재시도는 없다.
-이번에도 확인되지 않으면 현재 안전하게 확인 가능한 범위에서는 이 API를 가져올 수 없다고 결론짓고 탐색을 중단한다.
-worker별로 별도 1회이며, 외부 client 내부의 재시도·인증 갱신·자체 로그는 통제하지 않는다.
-공유 client의 내부 상태나 background 호출의 Flask 컨텍스트 호환성은 실제 런타임 확인이 필요하다.
+이전 시즌 목록 API 탐색은 종료했다. `api_get`/`get_recent_program_codes`를 호출하던 임시 진단
+모듈과 background hook은 제거했으며 새 기능에서 재시도하지 않는다.
 
 ###### **<YAML 출력 정규화>**
 
